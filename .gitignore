@@ -27,3 +27,4 @@ verify_*.py
 # IDE
 .vscode/
 .idea/
+CLAUDE.md
