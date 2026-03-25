@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Sensitive IBKR data (real accounts)
+*.xml
+!demo_portfolio_2025.xml
+
+# Extracted CSVs (contain real financial data)
+*.csv
+
+# Personal output files
+*.txt
+last_report_output.txt
+final_entries_2025.txt
+all_tax_entries.txt
+tax_report_2025.txt
+
+# Debug/verify scripts (personal)
+debug_*.py
+verify_*.py
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
