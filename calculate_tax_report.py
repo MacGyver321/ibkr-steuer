@@ -334,7 +334,6 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
     summary_path = os.path.join(ib_tax_dir, 'pnl_summary.csv')
     summary_rows = []  # initialise so top-5 block can reference it safely
     added_from_summary = 0
-    default_fallback_rate = 1.0 if base_currency == 'EUR' else 0.95
     if os.path.exists(summary_path):
         summary_rows = load_csv(summary_path)
         
