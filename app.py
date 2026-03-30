@@ -365,6 +365,16 @@ zeile_22      = d.get('zeile_22_other_losses_eur', abs(d.get('options_loss_eur',
 zeile_23      = d.get('zeile_23_stock_losses_eur', abs(d.get('stocks_loss_eur', 0)))
 quellensteuer = d.get('withholding_tax_eur', 0)
 
+# ── Flex Query Hinweis ────────────────────────────────────────────────────────
+
+if not d.get('has_trade_price', False):
+    st.markdown("""
+<div style="background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #fbbf24;">Hinweis:</strong> Ihre Flex Query enthält kein <code>tradePrice</code>-Feld. Stillhalterprämien werden mit dem Tagesschlusskurs (<code>closePrice</code>) statt dem tatsächlichen Ausführungspreis berechnet.
+    Für genauere Ergebnisse: In IBKR unter <em>Reports → Flex Queries</em> eine erweiterte Query erstellen und bei <em>Trade Confirmation</em> alle Felder aktivieren (insbesondere <em>Execution</em>-Details).
+</div>
+""", unsafe_allow_html=True)
+
 # ── Hero ─────────────────────────────────────────────────────────────────────
 
 hero_color = "#4ade80" if zeile_19 >= 0 else "#f87171"

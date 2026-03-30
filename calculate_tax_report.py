@@ -15,6 +15,12 @@ def parse_date(date_str):
     except:
         return None
 
+def safe_float(val, default=0.0):
+    """Convert to float, returning default for empty strings or None."""
+    if val is None or val == '':
+        return default
+    return float(val)
+
 def get_exchange_rates(trades, funds):
     # Map Date -> USD_to_EUR rate
     # fxRateToBase for EUR records = EUR -> USD (e.g. 1.05 means 1 EUR = 1.05 USD)
@@ -236,7 +242,14 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
         trades.append(t)
         
     print(f"Loaded {len(all_trades)} trade rows. Removed {duplicates_count} duplicates. Unique trades: {len(trades)}")
-    
+
+    # Detect extended Flex Query (has tradePrice for accurate Stillhalter premium calc)
+    has_trade_price = any(t.get('tradePrice', '') not in ('', '0', None) for t in trades)
+    if has_trade_price:
+        print("Erweiterte Flex Query erkannt (tradePrice verfügbar).")
+    else:
+        print("Basis-Flex-Query erkannt (kein tradePrice — Stillhalterprämien nutzen closePrice als Näherung).")
+
     all_funds = load_csv(os.path.join(ib_tax_dir, 'statement_of_funds.csv'))
     unique_funds_set = set()
     funds = []
@@ -280,7 +293,7 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
             continue
 
         pnl_raw = float(pnl_str)
-        fx_to_base = float(t.get('fxRateToBase', 1.0))
+        fx_to_base = safe_float(t.get('fxRateToBase'), 1.0)
 
         if base_currency == 'EUR':
             # EUR base: pnl_raw × fxRateToBase already gives EUR
@@ -299,8 +312,8 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
                 stocks_gain += pnl_eur
             else:
                 stocks_loss += pnl_eur
-        elif category in ['OPT', 'FUT', 'FOP', 'BILL', 'BOND']:
-            # BILL = Treasury Bills, BOND = Bonds - treated as "sonstige" (other income)
+        elif category in ['OPT', 'FUT', 'FOP', 'FSFOP', 'BILL', 'BOND']:
+            # FSFOP = Flex Single-Stock Futures Options, BILL = Treasury Bills, BOND = Bonds
             if pnl_eur > 0:
                 options_gain += pnl_eur
             else:
@@ -321,26 +334,27 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
     stillhalter_count = 0
 
     opt_assignments = [t for t in trades
-                       if t.get('assetCategory') == 'OPT'
+                       if t.get('assetCategory') in ('OPT', 'FOP', 'FSFOP')
                        and t.get('transactionType') == 'BookTrade'
                        and t.get('buySell') == 'BUY'      # closing a short position
                        and t.get('putCall') == 'C'         # call options only
-                       and abs(float(t.get('fifoPnlRealized', 0) or 0)) < 0.01]
+                       and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01]
 
     for a in opt_assignments:
         strike = a.get('strike')
         expiry = a.get('expiry')
         pc = a.get('putCall')
-        a_qty = abs(int(float(a.get('quantity', 0) or 0)))
+        a_cat = a.get('assetCategory')
+        a_qty = abs(int(safe_float(a.get('quantity'))))
         if not strike or not expiry or not pc or a_qty == 0:
             continue
 
         # Opposite side: if assignment is BUY (closing short), original was SELL (opening)
         orig_side = 'SELL' if a.get('buySell') == 'BUY' else 'BUY'
 
-        # Find the original opening ExchTrade
+        # Find ALL original opening ExchTrades (may be multiple partial fills)
         originals = [t for t in trades
-                     if t.get('assetCategory') == 'OPT'
+                     if t.get('assetCategory') == a_cat
                      and t.get('transactionType') == 'ExchTrade'
                      and t.get('strike') == strike
                      and t.get('expiry') == expiry
@@ -348,20 +362,34 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
                      and t.get('buySell') == orig_side]
 
         if not originals:
+            print(f"  Stillhalter: Kein Original-SELL gefunden für {a.get('symbol', strike)} {expiry} {pc}")
             continue
 
-        orig = originals[0]
-        price = float(orig.get('closePrice', 0) or 0)
-        mult = int(float(orig.get('multiplier', 100) or 100))
-        orig_qty = abs(int(float(orig.get('quantity', 0) or 0)))
-        if orig_qty == 0 or price == 0:
+        # Weighted average premium across all fills
+        # Use tradePrice (actual fill price) if available, fall back to closePrice
+        total_premium_raw = 0.0
+        total_orig_qty = 0
+        mult = int(safe_float(originals[0].get('multiplier'), 100))
+
+        for orig in originals:
+            price = safe_float(orig.get('tradePrice')) or safe_float(orig.get('closePrice'))
+            qty = abs(int(safe_float(orig.get('quantity'))))
+            if qty > 0 and price > 0:
+                total_premium_raw += price * mult * qty
+                total_orig_qty += qty
+
+        if total_orig_qty == 0 or total_premium_raw == 0:
             continue
 
-        # Premium per contract, scaled to assignment quantity
-        premium_raw = price * mult * a_qty / orig_qty
+        # Scale to assignment quantity (may be less than total originally sold)
+        premium_raw = total_premium_raw * a_qty / total_orig_qty
 
-        # Convert to EUR using the assignment date's rate
-        fx_to_base = float(orig.get('fxRateToBase') or 1.0)
+        # Convert to EUR using the original trade's FX rate
+        # Use weighted average rate from originals
+        fx_weighted = sum(safe_float(o.get('fxRateToBase'), 1.0) * abs(int(safe_float(o.get('quantity'))))
+                         for o in originals if safe_float(o.get('quantity')) != 0)
+        fx_to_base = fx_weighted / total_orig_qty if total_orig_qty else 1.0
+
         if base_currency == 'EUR':
             premium_eur = premium_raw * fx_to_base
         else:
@@ -376,11 +404,12 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
     if stillhalter_premium_eur > 0:
         stocks_gain -= stillhalter_premium_eur
         options_gain += stillhalter_premium_eur
-        print(f"Stillhalterprämien: {stillhalter_count} Assignments, {stillhalter_premium_eur:,.2f} EUR von Topf 1 → Topf 2 verschoben.")
+        price_source = "tradePrice" if has_trade_price else "closePrice (Näherung)"
+        print(f"Stillhalterprämien: {stillhalter_count} Assignments, {stillhalter_premium_eur:,.2f} EUR von Topf 1 → Topf 2 verschoben (Quelle: {price_source}).")
 
     # --- PLAUSIBILITY: Raw Sums for Reconciliation ---
-    raw_div_base = sum(float(f.get('amount', 0)) for f in funds if f.get('activityCode') == 'DIV' and (d := parse_date(f.get('date'))) is not None and d.year == tax_year)
-    raw_tax_base = sum(float(f.get('amount', 0)) for f in funds if f.get('activityCode') in ['FRTAX', 'WHT'] and (d := parse_date(f.get('date'))) is not None and d.year == tax_year)
+    raw_div_base = sum(safe_float(f.get('amount')) for f in funds if f.get('activityCode') == 'DIV' and (d := parse_date(f.get('date'))) is not None and d.year == tax_year)
+    raw_tax_base = sum(safe_float(f.get('amount')) for f in funds if f.get('activityCode') in ['FRTAX', 'WHT'] and (d := parse_date(f.get('date'))) is not None and d.year == tax_year)
     
     # 4. Dividends, Interest, and Withholding Tax
     dividends_eur = 0.0
@@ -407,7 +436,7 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
             
         funds_processed += 1
             
-        amount_raw = float(f.get('amount', 0) or 0)
+        amount_raw = safe_float(f.get('amount'))
         curr = f.get('currency')
 
         if base_currency == 'EUR':
@@ -422,7 +451,7 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
             elif curr == 'USD':
                 amount_eur = amount_raw * rate_eur
             else:
-                fx = float(f.get('fxRateToBase', 1.0))
+                fx = safe_float(f.get('fxRateToBase'), 1.0)
                 amount_usd = amount_raw * fx
                 amount_eur = amount_usd * rate_eur
         
@@ -520,7 +549,7 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
                 if asset == 'STK':
                     stocks_gain += gain_eur
                     stocks_loss += loss_eur
-                elif asset in ['OPT', 'FUT', 'FOP']:
+                elif asset in ['OPT', 'FUT', 'FOP', 'FSFOP']:
                     options_gain += gain_eur
                     options_loss += loss_eur
                 added_from_summary += 1
@@ -532,6 +561,7 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
     fx_results = {}
     fx_total_gain = 0.0
     fx_total_loss = 0.0
+    fx_has_prior_data = True  # default: no warning needed
 
     fx_path = os.path.join(ib_tax_dir, 'fx_transactions.csv')
     if os.path.exists(fx_path) and base_currency == 'EUR':
@@ -621,6 +651,7 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
         "fx_translation": fx_translation,
         "fx_has_prior_data": fx_has_prior_data,
         # Plausibility Metadata
+        "has_trade_price": has_trade_price,
         "audit": {
             "funds_processed": funds_processed,
             "funds_skipped_year": funds_skipped_year,

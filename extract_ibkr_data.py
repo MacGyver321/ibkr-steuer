@@ -148,15 +148,28 @@ def parse_ibkr_xml(xml_file_path, output_dir):
         # Collect headers from all keys in all rows to handle optional attributes
         headers = set()
         data_rows = []
-        
+        skipped = 0
+
         for row in rows:
             attrib = row.attrib
+
+            # For Trades: only keep EXECUTION-level rows (real trades).
+            # Extended Flex Queries may include ORDER, CLOSED_LOT, SYMBOL_SUMMARY,
+            # ASSET_SUMMARY rows that have empty numeric fields and cause errors.
+            if section_tag == 'Trades':
+                lod = attrib.get('levelOfDetail', '')
+                if lod and lod != 'EXECUTION':
+                    skipped += 1
+                    continue
+
             headers.update(attrib.keys())
-            # Extract ALL records
             record = attrib.copy()
             record['__source_section__'] = section_tag
-            
+
             data_rows.append(record)
+
+        if skipped:
+            print(f"  Filtered {skipped} non-EXECUTION rows from {section_tag}")
 
 
         # Write to CSV
