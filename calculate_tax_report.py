@@ -83,6 +83,124 @@ def get_rate_for_date(target_date, rates_map):
     # If target is before all data, use earliest available
     return rates_map[sorted_dates[0]]
 
+def calculate_fx_gains(fx_transactions, tax_year):
+    """
+    Berechnet FIFO-basierte Fremdwährungs-Gewinne/Verluste pro Währung.
+
+    Jede Kontobewegung mit echtem fxRateToBase (nicht 1.0) wird als FX-Ereignis
+    gewertet — Zuflüsse als Anschaffung, Abflüsse als Veräußerung (FIFO).
+
+    Lots werden über alle Jahre aufgebaut (Multi-Year-Support), aber Gewinne/Verluste
+    werden nur für Abflüsse im tax_year gezählt.
+
+    Bei Single-Year-Daten wird der Starting Balance als Anfangslot zum 01.01.-Kurs
+    verwendet (Vereinfachung) und eine Warnung gesetzt.
+
+    Returns:
+        dict per currency, float total_gain, float total_loss, bool has_prior_data
+    """
+    from collections import defaultdict, deque
+
+    by_currency = defaultdict(list)
+    for tx in fx_transactions:
+        curr = tx.get('currency', '')
+        if curr:
+            by_currency[curr].append(tx)
+
+    for curr in by_currency:
+        by_currency[curr].sort(key=lambda x: x.get('date', ''))
+
+    results = {}
+    total_gain = 0.0
+    total_loss = 0.0
+
+    # Detect if we have full history or only single-year data.
+    # Key indicator: if any Starting Balance is non-trivial (> 100 units), we're
+    # missing prior FIFO lots. With full history from account opening, the initial
+    # balance would be 0.
+    starting_balance_total = 0.0
+    for tx in fx_transactions:
+        if tx.get('activityDescription') == 'Starting Balance':
+            starting_balance_total += abs(float(tx.get('balance', 0) or 0))
+
+    has_prior_data = starting_balance_total < 100
+
+    if has_prior_data:
+        print(f"FX: Multi-Year-Daten erkannt. FIFO-Lots werden vollständig aufgebaut.")
+    elif starting_balance_total > 0.01:
+        print(f"FX: Nur Steuerjahr {tax_year} geladen. Anfangsbestände ({starting_balance_total:,.0f} Fremdwährung) "
+              f"werden zum 01.01.-Kurs angesetzt (Vereinfachung).")
+
+    for curr, txs in sorted(by_currency.items()):
+        lots = deque()
+        gain = 0.0
+        loss = 0.0
+        disposals = 0
+
+        for tx in txs:
+            date_str = tx.get('date', '')
+            activity_desc = tx.get('activityDescription', '')
+            amount = float(tx.get('amount', 0) or 0)
+            fx = float(tx.get('fxRateToBase', 0) or 0)
+
+            # Starting Balance → initial FIFO lot (only relevant for single-year data;
+            # with multi-year data the balance is 0 at account opening)
+            if activity_desc == 'Starting Balance':
+                balance = float(tx.get('balance', 0) or 0)
+                if balance > 0.01 and fx > 0:
+                    lots.append([date_str, balance, fx])
+                continue
+
+            # Skip ADJ entries (Futures daily MTM settlements) — their PnL is already
+            # captured via fifoPnlRealized in the Trades section
+            if tx.get('activityCode') == 'ADJ':
+                continue
+
+            # Skip entries without real EUR rate or zero amount
+            if fx <= 0 or abs(fx - 1.0) < 0.001 or abs(amount) < 0.001:
+                continue
+
+            if amount > 0:
+                lots.append([date_str, amount, fx])
+            else:
+                dispose_amount = abs(amount)
+                date = parse_date(date_str)
+
+                while dispose_amount > 0.001 and lots:
+                    lot_date, lot_remaining, lot_rate = lots[0]
+                    take = min(dispose_amount, lot_remaining)
+
+                    if date and date.year == tax_year:
+                        pnl = take * (fx - lot_rate)
+                        if pnl > 0:
+                            gain += pnl
+                        else:
+                            loss += pnl
+                        disposals += 1
+
+                    lot_remaining -= take
+                    dispose_amount -= take
+
+                    if lot_remaining < 0.001:
+                        lots.popleft()
+                    else:
+                        lots[0][1] = lot_remaining
+
+        net = gain + loss
+        if abs(gain) > 0.01 or abs(loss) > 0.01:
+            results[curr] = {
+                'gain': gain,
+                'loss': loss,
+                'net': net,
+                'lots_remaining': len(lots),
+                'disposals_count': disposals,
+            }
+            total_gain += gain
+            total_loss += loss
+
+    return results, total_gain, total_loss, has_prior_data
+
+
 def calculate_tax(ib_tax_dir, tax_year=2025):
     # 0. Detect base currency from account_info.csv
     base_currency = 'USD'  # default for backward compatibility
@@ -410,63 +528,41 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
         if added_from_summary > 0:
             print(f"Added {added_from_summary} instruments from PnL Summary fallback (ISIN-based).")
 
-    # --- Top 5 Gains / Losses (plausibility check) ---
-    # Source: pnl_summary.csv (has readable descriptions for all instrument types)
-    # EUR conversion uses average daily rate (approximation — for display only)
-    top_gains = []
-    top_losses = []
+    # --- Fremdwährungs-Gewinne/Verluste (FIFO) ---
+    fx_results = {}
+    fx_total_gain = 0.0
+    fx_total_loss = 0.0
 
-    if os.path.exists(summary_path):
-        # Build ISIN -> ticker from financial_instruments.csv
-        isin_to_ticker = {}
-        fi_path = os.path.join(ib_tax_dir, 'financial_instruments.csv')
-        if os.path.exists(fi_path):
-            for row in load_csv(fi_path):
-                isin = row.get('isin', '').strip()
-                sym  = row.get('symbol', '').strip()
-                desc = row.get('description', '').strip()
-                if isin:
-                    isin_to_ticker[isin] = sym if sym else desc[:25]
+    fx_path = os.path.join(ib_tax_dir, 'fx_transactions.csv')
+    if os.path.exists(fx_path) and base_currency == 'EUR':
+        fx_transactions = load_csv(fx_path)
+        fx_results, fx_total_gain, fx_total_loss, fx_has_prior_data = calculate_fx_gains(fx_transactions, tax_year)
 
-        avg_rate = (sum(usd_to_eur_rates.values()) / len(usd_to_eur_rates)
-                    if usd_to_eur_rates else default_fallback_rate)
+        if fx_results:
+            # FX gains/losses go into Topf 2 (verzinsliches Fremdwährungsguthaben → §20 Abs. 2 S. 1 Nr. 7)
+            options_gain += fx_total_gain
+            options_loss += fx_total_loss
+            print(f"FX Währungsgewinne: {fx_total_gain:,.2f} EUR, Währungsverluste: {fx_total_loss:,.2f} EUR")
+            for curr, data in sorted(fx_results.items()):
+                print(f"  {curr}: Gewinn {data['gain']:,.2f}, Verlust {data['loss']:,.2f}, Netto {data['net']:,.2f} EUR ({data['disposals_count']} Veräußerungen)")
 
-        instruments_pnl = []
-        for row in (summary_rows if summary_rows else []):
-            # Skip summary/total rows (no asset category = aggregate rows)
-            if not row.get('assetCategory', '').strip():
-                continue
-            total_usd = float(row.get('totalRealizedPnl', 0) or 0)
-            if abs(total_usd) < 0.01:
-                continue
+    # Load MTM summary for plausibility comparison
+    fx_mtm = {}
+    fx_mtm_path = os.path.join(ib_tax_dir, 'fx_mtm_summary.csv')
+    if os.path.exists(fx_mtm_path):
+        for row in load_csv(fx_mtm_path):
+            sym = row.get('symbol', '')
+            total = float(row.get('total', 0) or 0)
+            if sym:
+                fx_mtm[sym] = total
 
-            isin = row.get('isin', '').strip()
-            sym  = row.get('symbol', '').strip()
-            desc = row.get('description', '').strip()
-            cat  = row.get('assetCategory', '')
-
-            # Best human-readable label:
-            # STK with ISIN: use clean ticker from financial_instruments lookup
-            # OPT/BOND/BILL: use description (e.g. "AAPL 21FEB25 200 P", "DBR 0 08/15/52")
-            if cat == 'STK' and isin and isin in isin_to_ticker:
-                label = isin_to_ticker[isin]
-            elif desc:
-                label = desc[:30]
-            elif sym:
-                label = sym[:30]
-            else:
-                label = isin or '—'
-
-            instruments_pnl.append({
-                'ticker':   label,
-                'category': cat,
-                'pnl_eur':  total_usd * avg_rate,
-                'pnl_usd':  total_usd,
-            })
-
-        instruments_pnl.sort(key=lambda x: x['pnl_eur'], reverse=True)
-        top_gains  = [x for x in instruments_pnl if x['pnl_eur'] > 0][:5]
-        top_losses = [x for x in reversed(instruments_pnl) if x['pnl_eur'] < 0][:5]
+    # Load IBKR's own fxTranslationGainLoss as reference
+    fx_translation = 0.0
+    fx_tgl_path = os.path.join(ib_tax_dir, 'fx_translation.csv')
+    if os.path.exists(fx_tgl_path):
+        tgl_rows = load_csv(fx_tgl_path)
+        if tgl_rows:
+            fx_translation = float(tgl_rows[0].get('fxTranslationGainLoss', 0) or 0)
 
     # Correct Anlage KAP Structure (2025):
     # Two separate "pots" (Töpfe) for loss offsetting:
@@ -517,9 +613,13 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
         "options_net_eur": options_gain + options_loss,
         "withholding_tax_eur": withholding_tax_eur,
         "base_currency": base_currency,
-        # Top 5 for plausibility check
-        "top_gains":  top_gains,
-        "top_losses": top_losses,
+        # FX currency gains/losses
+        "fx_results": fx_results,
+        "fx_total_gain": fx_total_gain,
+        "fx_total_loss": fx_total_loss,
+        "fx_mtm": fx_mtm,
+        "fx_translation": fx_translation,
+        "fx_has_prior_data": fx_has_prior_data,
         # Plausibility Metadata
         "audit": {
             "funds_processed": funds_processed,
@@ -556,6 +656,26 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
     print(f"    ─────────────────────────────────────")
     print(f"    Saldo Sonstiges:       {topf_2_sonstiges:>12,.2f} EUR")
     
+    if fx_results:
+        print("-" * 60)
+        print("FREMDWÄHRUNGS-GEWINNE/VERLUSTE (FIFO, §20 Abs. 2 S. 1 Nr. 7)")
+        for curr, data in sorted(fx_results.items()):
+            mtm_val = fx_mtm.get(curr)
+            mtm_info = f"  (MTM: {mtm_val:,.2f})" if mtm_val is not None else ""
+            print(f"    {curr}: Gewinn {data['gain']:>10,.2f}  Verlust {data['loss']:>10,.2f}  Netto {data['net']:>10,.2f} EUR{mtm_info}")
+        print(f"    ─────────────────────────────────────")
+        print(f"    FX Gesamt Gewinn:      {fx_total_gain:>12,.2f} EUR")
+        print(f"    FX Gesamt Verlust:     {fx_total_loss:>12,.2f} EUR")
+        print(f"    FX Netto:              {fx_total_gain + fx_total_loss:>12,.2f} EUR")
+        if fx_translation != 0:
+            print(f"    IBKR Referenz (fxTranslationGainLoss): {fx_translation:>10,.2f} EUR")
+        if not fx_has_prior_data:
+            print(f"    (!) HINWEIS: Anfangsbestände zum 01.01.-Kurs angesetzt (Vereinfachung).")
+            print(f"        Für exakte FIFO-Lots: Flex Query ab Kontoeröffnung laden.")
+        else:
+            print(f"    Multi-Year-Daten: FIFO-Lots vollständig ab Kontoeröffnung.")
+        print(f"    (in Topf 2 enthalten)")
+
     print("-" * 60)
     print("ZEILE 19 (Ausländische Kapitalerträge - NETTO):")
     print(f"    = Saldo Aktien + Saldo Sonstiges")

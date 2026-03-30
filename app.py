@@ -220,7 +220,12 @@ st.markdown("""
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def fmt(value: float, decimals: int = 2) -> str:
-    return f"{value:,.{decimals}f} €"
+    s = f"{value:,.{decimals}f}"
+    return s.replace(',', 'X').replace('.', ',').replace('X', '.') + " €"
+
+def fmt_de(value: float, decimals: int = 2) -> str:
+    s = f"{value:,.{decimals}f}"
+    return s.replace(',', 'X').replace('.', ',').replace('X', '.')
 
 def color_class(value: float) -> str:
     if value > 0:
@@ -254,6 +259,9 @@ def kap_row(zeile: str, label: str, value: float, highlight: bool = False,
         <span class="kap-value" style="color: var(--color-{val_color}, #f1f5f9)">{fmt(display_val)}</span>
     </div>"""
 
+def section_title(text: str):
+    st.markdown(f'<div class="section-title">{text}</div>', unsafe_allow_html=True)
+
 # inline color vars for kap_row values
 COLOR_VARS = """
 <style>
@@ -261,6 +269,27 @@ COLOR_VARS = """
         --color-green: #4ade80;
         --color-red:   #f87171;
         --color-white: #f1f5f9;
+    }
+
+    /* Translate Streamlit file uploader to German */
+    [data-testid="stFileUploaderDropzoneInstructions"] {
+        font-size: 0 !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] svg {
+        height: 2.5rem;
+        width: 2.5rem;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"]::after {
+        content: "Datei hierher ziehen";
+        font-size: 0.875rem;
+        color: #e2e8f0;
+    }
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 0 !important;
+    }
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "Datei auswählen";
+        font-size: 0.875rem;
     }
 </style>"""
 
@@ -273,12 +302,19 @@ st.markdown('<p class="page-sub">Anlage KAP · Interactive Brokers Flex Query</p
 
 st.markdown("""
 <div style="background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.2); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
-    <strong style="color: #60a5fa;">Datenschutz:</strong> Alle Berechnungen erfolgen ausschliesslich lokal in Ihrem Browser. Es werden keine Daten an Server uebertragen, gespeichert oder an Dritte weitergegeben.
+    <strong style="color: #60a5fa;">Datenschutz:</strong> Alle Berechnungen erfolgen ausschließlich lokal in Ihrem Browser. Es werden keine Daten an Server übertragen, gespeichert oder an Dritte weitergegeben.
 </div>
 """, unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("IBKR Flex Query hochladen (XML)", type="xml",
+uploaded_file = st.file_uploader("IBKR Flex Query hochladen - Steuerjahr (XML)", type="xml",
                                   label_visibility="collapsed")
+fx_history_files = st.file_uploader(
+    "Optional: Vorjahres-XMLs für exakte FX-Berechnung",
+    type="xml", accept_multiple_files=True,
+    help="Für exakte FIFO-Berechnung der Fremdwährungs-Gewinne/Verluste: "
+         "Flex Query XMLs der Vorjahre hochladen (ab Kontoeröffnung). "
+         "Die Steuerberechnung (Aktien, Optionen etc.) nutzt nur die Hauptdatei.",
+    label_visibility="visible")
 
 if uploaded_file is None:
     st.markdown("""
@@ -297,8 +333,21 @@ with st.spinner("Berechne Steuerreport…"):
         xml_path = os.path.join(tmp, "input.xml")
         with open(xml_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
+
+        # Save history XMLs if provided
+        history_paths = []
+        for i, hf in enumerate(fx_history_files or []):
+            hp = os.path.join(tmp, f"history_{i}.xml")
+            with open(hp, "wb") as f:
+                f.write(hf.getbuffer())
+            history_paths.append(hp)
+
         try:
-            extract_ibkr_data.parse_ibkr_xml(xml_path, tmp)
+            if history_paths:
+                all_xmls = sorted(history_paths) + [xml_path]
+                extract_ibkr_data.extract_fx_multi_xml(all_xmls, tmp)
+            else:
+                extract_ibkr_data.parse_ibkr_xml(xml_path, tmp)
             d = calculate_tax_report.calculate_tax(tmp)
         except Exception as e:
             st.error(f"Fehler beim Verarbeiten: {e}")
@@ -306,15 +355,15 @@ with st.spinner("Berechne Steuerreport…"):
             st.stop()
 
 # Derived values
-topf_1        = d.get('topf_1_aktien_netto',    d['stocks_net_eur'])
+topf_1        = d.get('topf_1_aktien_netto', d.get('stocks_net_eur', 0))
 topf_2        = d.get('topf_2_sonstiges_netto',
-                      d['dividends_eur'] + d['interest_eur'] +
-                      d['options_gain_eur'] + d['options_loss_eur'])
-zeile_19      = d.get('zeile_19_netto_eur',      topf_1 + topf_2)
-zeile_20      = d.get('zeile_20_stock_gains_eur', d['stocks_gain_eur'])
-zeile_22      = d.get('zeile_22_other_losses_eur', abs(d['options_loss_eur']))
-zeile_23      = d.get('zeile_23_stock_losses_eur', abs(d['stocks_loss_eur']))
-quellensteuer = d['withholding_tax_eur']
+                      d.get('dividends_eur', 0) + d.get('interest_eur', 0) +
+                      d.get('options_gain_eur', 0) + d.get('options_loss_eur', 0))
+zeile_19      = d.get('zeile_19_netto_eur', topf_1 + topf_2)
+zeile_20      = d.get('zeile_20_stock_gains_eur', d.get('stocks_gain_eur', 0))
+zeile_22      = d.get('zeile_22_other_losses_eur', abs(d.get('options_loss_eur', 0)))
+zeile_23      = d.get('zeile_23_stock_losses_eur', abs(d.get('stocks_loss_eur', 0)))
+quellensteuer = d.get('withholding_tax_eur', 0)
 
 # ── Hero ─────────────────────────────────────────────────────────────────────
 
@@ -329,8 +378,7 @@ st.markdown(f"""
 
 # ── Topf 1: Aktien ───────────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Topf 1 · Aktien (separate Verrechnung §20 Abs. 6 S. 4 EStG)</div>',
-            unsafe_allow_html=True)
+section_title("Topf 1 · Aktien (separate Verrechnung §20 Abs. 6 S. 4 EStG)")
 
 st.markdown(
     '<div class="metric-grid">'
@@ -343,8 +391,7 @@ st.markdown(
 
 # ── Topf 2: Sonstiges ────────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Topf 2 · Sonstiges (inkl. Termingeschäfte, Dividenden, Zinsen)</div>',
-            unsafe_allow_html=True)
+section_title("Topf 2 · Sonstiges (inkl. Termingeschäfte, Dividenden, Zinsen)")
 
 st.markdown(
     '<div class="metric-grid">'
@@ -357,9 +404,52 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ── Fremdwährungs-Gewinne/Verluste ──────────────────────────────────────────
+
+fx_results = d.get('fx_results', {})
+fx_total_gain = d.get('fx_total_gain', 0)
+fx_total_loss = d.get('fx_total_loss', 0)
+fx_mtm = d.get('fx_mtm', {})
+
+if fx_results:
+    section_title("Fremdwährungs-Gewinne/Verluste (FIFO)")
+
+    st.markdown(
+        '<div class="metric-grid">'
+        + metric_card("FX Gewinne", fx_total_gain, "gain")
+        + metric_card("FX Verluste", fx_total_loss, "loss")
+        + metric_card("FX Netto", fx_total_gain + fx_total_loss, "saldo")
+        + '</div>',
+        unsafe_allow_html=True
+    )
+
+    with st.expander("Details pro Währung"):
+        fx_table = "| Währung | Gewinn | Verlust | Netto | MTM (Vergleich) |\n|---------|--------|---------|-------|----------------|\n"
+        for curr, data in sorted(fx_results.items()):
+            mtm_val = fx_mtm.get(curr)
+            mtm_str = f"{fmt_de(mtm_val)} EUR" if mtm_val is not None else "-"
+            fx_table += f"| {curr} | {fmt_de(data['gain'])} | {fmt_de(data['loss'])} | {fmt_de(data['net'])} | {mtm_str} |\n"
+        st.markdown(fx_table)
+        fx_tgl = d.get('fx_translation', 0)
+        if fx_tgl != 0:
+            st.markdown(f"**IBKR Referenz (fxTranslationGainLoss):** {fmt_de(fx_tgl)} EUR")
+        fx_prior = d.get('fx_has_prior_data', False)
+        if fx_prior:
+            st.success("Multi-Year-Daten erkannt - FIFO-Lots werden vollständig ab Kontoeröffnung aufgebaut. "
+                       "Die Berechnung ist exakt.")
+        else:
+            st.warning("**Nur Steuerjahr geladen.** Fremdwährungs-Anfangsbestände werden zum 01.01.-Kurs "
+                       "als Anschaffung angesetzt (Vereinfachung). Für exakte FIFO-Berechnung: "
+                       "Flex Query ab **Kontoeröffnung** laden (z.B. 2021-2025). "
+                       "Die Steuerberechnung (Aktien, Optionen, Dividenden etc.) bleibt davon unberührt - "
+                       "nur die Fremdwährungs-Gewinne/Verluste werden genauer.")
+        st.info("**Rechtsgrundlage:** BMF-Schreiben Rn. 131 - verzinsliches Fremdwährungsguthaben, "
+                "§20 Abs. 2 S. 1 Nr. 7 EStG (Anlage KAP, Topf 2). FIFO-Methode (§20 Abs. 4 S. 7). "
+                "In Topf 2 enthalten.")
+
 # ── Anlage KAP Zeilen ────────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Anlage KAP · Eintragungen</div>', unsafe_allow_html=True)
+section_title("Anlage KAP · Eintragungen")
 
 st.markdown(
     kap_row("Z. 19", "Ausländische Kapitalerträge (Netto)", zeile_19, highlight=True)
@@ -372,7 +462,7 @@ st.markdown(
 
 # ── Steuerliche Regeln & Berechnungsmethodik ─────────────────────────────────
 
-st.markdown('<div class="section-title">Steuerliche Regeln & Berechnungsmethodik</div>', unsafe_allow_html=True)
+section_title("Steuerliche Regeln & Berechnungsmethodik")
 
 audit = d.get('audit', {})
 sh_count = audit.get('stillhalter_count', 0)
@@ -406,6 +496,20 @@ Das Finanzamt wendet die Verlustverrechnungsbeschränkung anhand der Zeilen 20 u
 | **BOND** (Anleihen) | Kapitalforderung (§20 Abs. 2 Nr. 7) | Topf 2 |
 | **DIV/PIL** (Dividenden) | Laufende Erträge (§20 Abs. 1 Nr. 1) | Topf 2 |
 | **INTR/CINT** (Zinsen) | Zinserträge (§20 Abs. 1 Nr. 7) | Topf 2 |
+| **CASH/FOREX** (Fremdwährung) | Verzinsl. Fremdwährungsguthaben (§20 Abs. 2 Nr. 7, BMF Rn. 131) | Topf 2 |
+
+---
+
+### Fremdwährungs-Gewinne/Verluste (BMF Rn. 131)
+
+Beim Halten von Fremdwährungsguthaben (z.B. USD) auf einem verzinslichen Konto (IBKR zahlt Zinsen) entstehen bei Kursänderungen steuerlich relevante Gewinne oder Verluste:
+
+- **Anschaffung** = jeder Zufluss von Fremdwährung (Kauf, Dividende, Verkaufserlös)
+- **Veräußerung** = jeder Abfluss (Rücktausch, Aktienkauf, Gebühren)
+- **FIFO-Methode**: die zuerst erworbenen Beträge werden zuerst veräußert
+- **Rechtsgrundlage**: §20 Abs. 2 S. 1 Nr. 7 EStG, Anlage KAP, Topf 2
+
+**Hinweis:** Ohne Vorjahres-XMLs wird der Jahresanfangsbestand zum 01.01.-Kurs als Anschaffung angesetzt (Vereinfachung). Für exakte Berechnung können Vorjahres-XMLs hochgeladen werden. IBKR liefert keine FIFO-Daten für Währungsgewinne, diese werden hier eigenständig berechnet.
 
 ---
 
@@ -418,7 +522,7 @@ Wenn Sie eine Call-Option verkaufen (Stillhalter) und diese ausgeübt wird (Assi
 
 IBKR bündelt beides im Aktien-Trade. Dieses Tool erkennt Assignments automatisch und trennt die Prämie heraus.
 
-{"**In Ihrem Report:** " + str(sh_count) + " Call-Assignments erkannt, " + f"{sh_eur:,.2f}" + " EUR Stillhalterprämien von Topf 1 nach Topf 2 verschoben." if sh_count > 0 else "**In Ihrem Report:** Keine Call-Assignments erkannt."}
+{"**In Ihrem Report:** " + str(sh_count) + " Call-Assignments erkannt, " + fmt_de(sh_eur) + " EUR Stillhalterprämien von Topf 1 nach Topf 2 verschoben." if sh_count > 0 else "**In Ihrem Report:** Keine Call-Assignments erkannt."}
 
 ---
 
@@ -480,34 +584,54 @@ Da Interactive Brokers ein **ausländischer Broker ohne inländischen Steuerabzu
 
 # ── Export ───────────────────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Export</div>', unsafe_allow_html=True)
+section_title("Export")
+
+# Build optional export sections
+fx_export = ""
+if fx_results:
+    fx_export = "\nFREMDWÄHRUNGS-GEWINNE/VERLUSTE (FIFO)\n"
+    for curr, data in sorted(fx_results.items()):
+        fx_export += f"  {curr}: Gewinn {fmt_de(data['gain']):>10}  Verlust {fmt_de(data['loss']):>10}  Netto {fmt_de(data['net']):>10} EUR\n"
+    fx_net = fx_total_gain + fx_total_loss
+    fx_export += f"  ─────────────────────────────────────────────────\n"
+    fx_export += f"  FX Gesamt Gewinn:      {fmt_de(fx_total_gain):>14} EUR\n"
+    fx_export += f"  FX Gesamt Verlust:     {fmt_de(fx_total_loss):>14} EUR\n"
+    fx_export += f"  FX Netto:              {fmt_de(fx_net):>14} EUR\n"
+    fx_export += "  (In Topf 2 enthalten, BMF Rn. 131)\n"
+
+sh_export = ""
+if sh_count > 0:
+    sh_export = f"\nSTILLHALTERPRÄMIEN (BMF Rn. 25-35)\n"
+    sh_export += f"  {sh_count} Call-Assignment(s) erkannt\n"
+    sh_export += f"  Prämien umgebucht:     {fmt_de(sh_eur):>14} EUR\n"
+    sh_export += f"  (Von Topf 1 nach Topf 2 verschoben)\n"
 
 report_text = f"""ANLAGE KAP 2025 - Steuerbericht
 Erstellt: {_dt.now().strftime('%d.%m.%Y %H:%M')}
-Basiswährung: {d['base_currency']}
+Basiswährung: {d.get('base_currency', 'USD')}
 
 ═══════════════════════════════════════════════════
 TOPF 1: AKTIEN
-  Aktiengewinne:         {d['stocks_gain_eur']:>14,.2f} EUR
-  Aktienverluste:        {d['stocks_loss_eur']:>14,.2f} EUR
+  Aktiengewinne:         {fmt_de(d.get('stocks_gain_eur', 0)):>14} EUR
+  Aktienverluste:        {fmt_de(d.get('stocks_loss_eur', 0)):>14} EUR
   ─────────────────────────────────────────────────
-  Saldo Aktien:          {topf_1:>14,.2f} EUR
+  Saldo Aktien:          {fmt_de(topf_1):>14} EUR
 
 TOPF 2: SONSTIGES (inkl. Termingeschäfte)
-  Dividenden:            {d['dividends_eur']:>14,.2f} EUR
-  Zinsen (netto):        {d['interest_eur']:>14,.2f} EUR
-  Optionsgewinne:        {d['options_gain_eur']:>14,.2f} EUR
-  Optionsverluste:       {d['options_loss_eur']:>14,.2f} EUR
+  Dividenden:            {fmt_de(d.get('dividends_eur', 0)):>14} EUR
+  Zinsen (netto):        {fmt_de(d.get('interest_eur', 0)):>14} EUR
+  Optionsgewinne:        {fmt_de(d.get('options_gain_eur', 0)):>14} EUR
+  Optionsverluste:       {fmt_de(d.get('options_loss_eur', 0)):>14} EUR
   ─────────────────────────────────────────────────
-  Saldo Sonstiges:       {topf_2:>14,.2f} EUR
-
+  Saldo Sonstiges:       {fmt_de(topf_2):>14} EUR
+{fx_export}{sh_export}
 ═══════════════════════════════════════════════════
 ANLAGE KAP EINTRAGUNGEN
-  Zeile 19 (Netto):      {zeile_19:>14,.2f} EUR
-  Zeile 20 (Aktiengewinne): {zeile_20:>11,.2f} EUR
-  Zeile 22 (Verluste o. Aktien): {zeile_22:>8,.2f} EUR
-  Zeile 23 (Aktienverluste): {zeile_23:>11,.2f} EUR
-  Zeile 41 (Quellensteuer): {quellensteuer:>11,.2f} EUR
+  Zeile 19 (Netto):      {fmt_de(zeile_19):>14} EUR
+  Zeile 20 (Aktiengewinne): {fmt_de(zeile_20):>11} EUR
+  Zeile 22 (Verluste o. Aktien): {fmt_de(zeile_22):>8} EUR
+  Zeile 23 (Aktienverluste): {fmt_de(zeile_23):>11} EUR
+  Zeile 41 (Quellensteuer): {fmt_de(quellensteuer):>11} EUR
 ═══════════════════════════════════════════════════
 """
 
@@ -521,35 +645,35 @@ st.download_button(
 
 # ── Rechtliche Hinweise ──────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Rechtliche Hinweise</div>', unsafe_allow_html=True)
+section_title("Rechtliche Hinweise")
 
 st.markdown("""
 <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 1.25rem 1.25rem; font-size: 0.78rem; color: #64748b; line-height: 1.7;">
 
 <strong style="color: #94a3b8;">Haftungsausschluss</strong><br>
-Dieses Tool dient ausschliesslich zur Unterstuetzung bei der Erstellung der Einkommensteuererklaerung. Die berechneten Werte sind unverbindlich und ohne Gewaehr fuer Richtigkeit, Vollstaendigkeit oder Aktualitaet. Der Nutzer ist fuer die Pruefung aller Angaben in seiner Steuererklaerung selbst verantwortlich. Die Nutzung erfolgt auf eigenes Risiko.
+Dieses Tool dient ausschließlich zur Unterstützung bei der Erstellung der Einkommensteuererklärung. Die berechneten Werte sind unverbindlich und ohne Gewähr für Richtigkeit, Vollständigkeit oder Aktualität. Der Nutzer ist für die Prüfung aller Angaben in seiner Steuererklärung selbst verantwortlich. Die Nutzung erfolgt auf eigenes Risiko.
 
 <br><br>
 <strong style="color: #94a3b8;">Keine Steuerberatung</strong><br>
-Dieses Tool stellt keine Steuerberatung im Sinne des Steuerberatungsgesetzes (StBerG) dar und ersetzt nicht die Beratung durch einen Steuerberater, Wirtschaftspruefer oder eine andere zur Steuerberatung befugte Person. Bei Unsicherheiten oder komplexen Sachverhalten konsultieren Sie bitte einen steuerlichen Berater.
+Dieses Tool stellt keine Steuerberatung im Sinne des Steuerberatungsgesetzes (StBerG) dar und ersetzt nicht die Beratung durch einen Steuerberater, Wirtschaftsprüfer oder eine andere zur Steuerberatung befugte Person. Bei Unsicherheiten oder komplexen Sachverhalten konsultieren Sie bitte einen steuerlichen Berater.
 
 <br><br>
 <strong style="color: #94a3b8;">Keine Haftung</strong><br>
-Die Entwickler und Mitwirkenden dieses Projekts haften nicht fuer Schaeden, die durch die Nutzung oder Nichtnutzung der berechneten Informationen entstehen, einschliesslich, aber nicht beschraenkt auf finanzielle Verluste, Steuernachzahlungen, Bussgelder oder Zinsen. Dies gilt sowohl fuer direkte als auch fuer indirekte Schaeden, unabhaengig davon, ob diese vorhersehbar waren.
+Die Entwickler und Mitwirkenden dieses Projekts haften nicht für Schäden, die durch die Nutzung oder Nichtnutzung der berechneten Informationen entstehen, einschließlich, aber nicht beschränkt auf finanzielle Verluste, Steuernachzahlungen, Bußgelder oder Zinsen. Dies gilt sowohl für direkte als auch für indirekte Schäden, unabhängig davon, ob diese vorhersehbar waren.
 
 <br><br>
 <strong style="color: #94a3b8;">Datenschutz und Datenverarbeitung</strong><br>
-Saemtliche Berechnungen werden ausschliesslich lokal im Browser des Nutzers ausgefuehrt (clientseitige Verarbeitung mittels WebAssembly). Es werden zu keinem Zeitpunkt personenbezogene Daten, Finanzdaten oder hochgeladene Dateien an einen Server uebertragen, gespeichert oder an Dritte weitergegeben. Es findet kein Tracking, keine Analyse und keine Protokollierung statt. Die Anwendung erfuellt die Anforderungen der DSGVO, da keine Datenverarbeitung durch den Anbieter erfolgt.
+Sämtliche Berechnungen werden ausschließlich lokal im Browser des Nutzers ausgeführt (clientseitige Verarbeitung mittels WebAssembly). Es werden zu keinem Zeitpunkt personenbezogene Daten, Finanzdaten oder hochgeladene Dateien an einen Server übertragen, gespeichert oder an Dritte weitergegeben. Es findet kein Tracking, keine Analyse und keine Protokollierung statt. Die Anwendung erfüllt die Anforderungen der DSGVO, da keine Datenverarbeitung durch den Anbieter erfolgt.
 
 <br><br>
-<strong style="color: #94a3b8;">Rechtsstand und Aktualitaet</strong><br>
-Die steuerlichen Berechnungen basieren auf dem Rechtsstand des Steuerjahres 2025, insbesondere auf §20 EStG, dem BMF-Schreiben vom 14.05.2025 (Einzelfragen zur Abgeltungsteuer) sowie dem Jahressteuergesetz 2024. Aenderungen der Rechtslage, der Verwaltungsauffassung oder der Rechtsprechung nach Veroeffentlichung dieses Tools werden nicht automatisch beruecksichtigt.
+<strong style="color: #94a3b8;">Rechtsstand und Aktualität</strong><br>
+Die steuerlichen Berechnungen basieren auf dem Rechtsstand des Steuerjahres 2025, insbesondere auf §20 EStG, dem BMF-Schreiben vom 14.05.2025 (Einzelfragen zur Abgeltungsteuer) sowie dem Jahressteuergesetz 2024. Änderungen der Rechtslage, der Verwaltungsauffassung oder der Rechtsprechung nach Veröffentlichung dieses Tools werden nicht automatisch berücksichtigt.
 
 <br><br>
 <strong style="color: #94a3b8;">Open Source</strong><br>
-Dieses Projekt ist unter der MIT-Lizenz veroeffentlicht. Der Quellcode ist frei einsehbar und pruefbar unter
+Dieses Projekt ist unter der MIT-Lizenz veröffentlicht. Der Quellcode ist frei einsehbar und prüfbar unter
 <a href="https://github.com/KonvexInvestment/ibkr-steuer" target="_blank" style="color: #60a5fa;">github.com/KonvexInvestment/ibkr-steuer</a>.
-Jeder kann den Code einsehen, pruefen und zur Verbesserung beitragen.
+Jeder kann den Code einsehen, prüfen und zur Verbesserung beitragen.
 
 </div>
 """, unsafe_allow_html=True)
