@@ -29,11 +29,29 @@ def extract_fx_from_root(root, base_curr, fx_fields=None):
     return fx_rows
 
 
+def extract_trades_from_root(root):
+    """Extract EXECUTION-level trades from a parsed XML root element."""
+    trades_node = root.find('.//Trades')
+    if trades_node is None:
+        return [], set()
+    headers = set()
+    rows = []
+    for row in trades_node:
+        attrib = row.attrib
+        lod = attrib.get('levelOfDetail', '')
+        if lod and lod != 'EXECUTION':
+            continue
+        headers.update(attrib.keys())
+        rows.append(attrib.copy())
+    return rows, headers
+
+
 def extract_fx_multi_xml(xml_files, output_dir):
-    """Extract and merge FX transactions from multiple XML files (multi-year).
+    """Extract and merge FX transactions and trades from multiple XML files (multi-year).
 
     The main XML (last file) is used for all standard sections (trades, funds, etc.).
-    FX transactions are merged from ALL files for complete FIFO lot history.
+    FX transactions and trades are merged from ALL files for complete FIFO lot history
+    and Stillhalter matching across years.
     """
     if not xml_files:
         return
@@ -41,6 +59,7 @@ def extract_fx_multi_xml(xml_files, output_dir):
     # Sort by filename to ensure chronological order
     xml_files = sorted(xml_files)
     main_xml = xml_files[-1]  # Last file = tax year
+    history_xmls = xml_files[:-1]
 
     print(f"Multi-XML: {len(xml_files)} Dateien, Haupt-XML: {os.path.basename(main_xml)}")
 
@@ -53,7 +72,52 @@ def extract_fx_multi_xml(xml_files, output_dir):
     acct = root.find('.//AccountInformation')
     base_curr = acct.attrib.get('currency', 'EUR') if acct is not None else 'EUR'
 
-    # 3. Merge FX transactions from ALL XMLs
+    # 3. Merge trades from history XMLs into trades.csv (for Stillhalter matching)
+    if history_xmls:
+        # Load existing trades from main XML
+        trades_path = os.path.join(output_dir, 'trades.csv')
+        existing_trades = []
+        existing_headers = set()
+        if os.path.exists(trades_path):
+            with open(trades_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                existing_headers = set(reader.fieldnames or [])
+                existing_trades = list(reader)
+
+        # Build dedup keys from existing trades
+        def trade_dedup_key(t):
+            return (t.get('dateTime', ''), t.get('isin', ''), t.get('buySell', ''),
+                    t.get('quantity', ''), t.get('closePrice', ''), t.get('fifoPnlRealized', ''))
+
+        existing_keys = {trade_dedup_key(t) for t in existing_trades}
+        added_history_trades = 0
+
+        for xml_path in history_xmls:
+            try:
+                t = ET.parse(xml_path)
+                r = t.getroot()
+                rows, hdrs = extract_trades_from_root(r)
+                existing_headers.update(hdrs)
+                for row in rows:
+                    key = trade_dedup_key(row)
+                    if key not in existing_keys:
+                        existing_keys.add(key)
+                        row['__source_section__'] = 'Trades'
+                        existing_trades.append(row)
+                        added_history_trades += 1
+            except Exception as e:
+                print(f"  FEHLER bei Trades aus {xml_path}: {e}")
+
+        if added_history_trades > 0:
+            existing_headers.add('__source_section__')
+            sorted_h = sorted(existing_headers)
+            with open(trades_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=sorted_h)
+                writer.writeheader()
+                writer.writerows(existing_trades)
+            print(f"  Trades: {added_history_trades} historische Trades aus Vorjahren hinzugefügt (für Stillhalter-Matching)")
+
+    # 4. Merge FX transactions from ALL XMLs
     all_fx = []
     for xml_path in xml_files:
         try:
@@ -271,16 +335,18 @@ if __name__ == "__main__":
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Check for --fx-history flag: additional XMLs for FX lot history
-    fx_history_files = []
+    # Check for --history / --fx-history flag: additional XMLs for FX lots + Stillhalter matching
+    history_files = []
     remaining_args = sys.argv[3:]
-    if '--fx-history' in remaining_args:
-        idx = remaining_args.index('--fx-history')
-        fx_history_files = remaining_args[idx + 1:]
+    for flag in ('--history', '--fx-history'):
+        if flag in remaining_args:
+            idx = remaining_args.index(flag)
+            history_files = remaining_args[idx + 1:]
+            break
 
-    if fx_history_files:
+    if history_files:
         # Multi-XML mode: main XML + history files
-        all_xmls = fx_history_files + [xml_file]
+        all_xmls = history_files + [xml_file]
         extract_fx_multi_xml(all_xmls, output_dir)
     else:
         parse_ibkr_xml(xml_file, output_dir)

@@ -287,6 +287,11 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
     options_loss = 0.0
 
     for t in trades:
+        # Only process trades from the tax year
+        date = parse_date(t.get('dateTime') or t.get('tradeDate'))
+        if not date or date.year != tax_year:
+            continue
+
         # Check if Realized PnL event
         pnl_str = t.get('fifoPnlRealized')
         if not pnl_str or float(pnl_str) == 0:
@@ -301,10 +306,9 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
         else:
             # USD base: two-step conversion (trade currency → USD → EUR)
             pnl_usd = pnl_raw * fx_to_base
-            date = parse_date(t.get('dateTime') or t.get('tradeDate'))
             rate_eur = get_rate_for_date(date, usd_to_eur_rates)
             pnl_eur = pnl_usd * rate_eur
-        
+
         category = t.get('assetCategory')
         
         if category == 'STK':
@@ -332,13 +336,17 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
 
     stillhalter_premium_eur = 0.0
     stillhalter_count = 0
+    stillhalter_unmatched = []
+    stillhalter_details = []
 
     opt_assignments = [t for t in trades
                        if t.get('assetCategory') in ('OPT', 'FOP', 'FSFOP')
                        and t.get('transactionType') == 'BookTrade'
                        and t.get('buySell') == 'BUY'      # closing a short position
                        and t.get('putCall') == 'C'         # call options only
-                       and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01]
+                       and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01
+                       and (d := parse_date(t.get('dateTime') or t.get('tradeDate'))) is not None
+                       and d.year == tax_year]             # only assignments in tax year
 
     for a in opt_assignments:
         strike = a.get('strike')
@@ -362,7 +370,16 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
                      and t.get('buySell') == orig_side]
 
         if not originals:
-            print(f"  Stillhalter: Kein Original-SELL gefunden für {a.get('symbol', strike)} {expiry} {pc}")
+            symbol = a.get('symbol', f"{strike} {expiry} {pc}")
+            print(f"  Stillhalter: Kein Original-SELL gefunden für {symbol} {expiry} {pc}")
+            stillhalter_unmatched.append({
+                'symbol': symbol,
+                'strike': strike,
+                'expiry': expiry,
+                'putCall': pc,
+                'quantity': a_qty,
+                'dateTime': a.get('dateTime', a.get('tradeDate', ''))
+            })
             continue
 
         # Weighted average premium across all fills
@@ -400,12 +417,44 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
         stillhalter_premium_eur += premium_eur
         stillhalter_count += 1
 
+        # Collect per-assignment details for Zuflussprinzip
+        orig_sell_date = None
+        for orig in originals:
+            od = parse_date(orig.get('dateTime') or orig.get('tradeDate'))
+            if od is not None and (orig_sell_date is None or od < orig_sell_date):
+                orig_sell_date = od
+        assignment_date = parse_date(a.get('dateTime') or a.get('tradeDate'))
+        stillhalter_details.append({
+            'symbol': a.get('symbol') or a.get('description') or f"{strike} {expiry} C",
+            'strike': strike,
+            'expiry': expiry,
+            'quantity': a_qty,
+            'premium_eur': premium_eur,
+            'assignment_date': str(assignment_date) if assignment_date else '',
+            'orig_sell_date': str(orig_sell_date) if orig_sell_date else '',
+            'orig_sell_year': orig_sell_date.year if orig_sell_date else tax_year,
+            'is_cross_year': (orig_sell_date.year < tax_year) if orig_sell_date else False,
+        })
+
     # Move premiums from Topf 1 (stocks) to Topf 2 (sonstiges)
     if stillhalter_premium_eur > 0:
         stocks_gain -= stillhalter_premium_eur
         options_gain += stillhalter_premium_eur
         price_source = "tradePrice" if has_trade_price else "closePrice (Näherung)"
         print(f"Stillhalterprämien: {stillhalter_count} Assignments, {stillhalter_premium_eur:,.2f} EUR von Topf 1 → Topf 2 verschoben (Quelle: {price_source}).")
+    if stillhalter_unmatched:
+        print(f"  (!) WARNUNG: {len(stillhalter_unmatched)} Call-Assignment(s) — der ursprüngliche Optionsverkauf "
+              f"(ExchTrade SELL) wurde nicht gefunden. Vermutlich in einem Vorjahr eröffnet. "
+              f"Ohne diesen kann die Stillhalterprämie nicht berechnet und von Topf 1 (Aktien) "
+              f"nach Topf 2 (Sonstiges) verschoben werden. Vorjahres-XMLs per --history laden.")
+
+    # Zuflussprinzip: cross-year premium aggregation
+    cross_year_premium_eur = sum(d['premium_eur'] for d in stillhalter_details if d['is_cross_year'])
+    cross_year_by_year = {}
+    for det in stillhalter_details:
+        if det['is_cross_year']:
+            yr = det['orig_sell_year']
+            cross_year_by_year[yr] = cross_year_by_year.get(yr, 0) + det['premium_eur']
 
     # --- PLAUSIBILITY: Raw Sums for Reconciliation ---
     raw_div_base = sum(safe_float(f.get('amount')) for f in funds if f.get('activityCode') == 'DIV' and (d := parse_date(f.get('date'))) is not None and d.year == tax_year)
@@ -660,7 +709,11 @@ def calculate_tax(ib_tax_dir, tax_year=2025):
             "added_from_summary": added_from_summary,
             "usd_to_eur_rates_count": len(usd_to_eur_rates),
             "stillhalter_count": stillhalter_count,
-            "stillhalter_premium_eur": stillhalter_premium_eur
+            "stillhalter_premium_eur": stillhalter_premium_eur,
+            "stillhalter_unmatched": stillhalter_unmatched,
+            "stillhalter_details": stillhalter_details,
+            "cross_year_premium_eur": cross_year_premium_eur,
+            "cross_year_by_year": cross_year_by_year
         }
     }
 

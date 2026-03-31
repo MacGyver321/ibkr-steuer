@@ -312,11 +312,13 @@ st.markdown("""
 uploaded_file = st.file_uploader("IBKR Flex Query hochladen - Steuerjahr (XML)", type="xml",
                                   label_visibility="collapsed")
 fx_history_files = st.file_uploader(
-    "Optional: Vorjahres-XMLs für exakte FX-Berechnung",
+    "Optional: Vorjahres-XMLs für exakte FX- & Stillhalter-Berechnung",
     type="xml", accept_multiple_files=True,
-    help="Für exakte FIFO-Berechnung der Fremdwährungs-Gewinne/Verluste: "
-         "Flex Query XMLs der Vorjahre hochladen (ab Kontoeröffnung). "
-         "Die Steuerberechnung (Aktien, Optionen etc.) nutzt nur die Hauptdatei.",
+    help="Vorjahres-XMLs werden benötigt für:\n"
+         "• **Stillhalterprämien:** Wenn Call-Optionen in einem Vorjahr verkauft und im Steuerjahr "
+         "assigned wurden, wird der Original-SELL-Trade für die korrekte Topf-Zuordnung benötigt.\n"
+         "• **Fremdwährung:** Exakte FIFO-Berechnung der Währungsgewinne/-verluste.\n\n"
+         "Flex Query XMLs der Vorjahre hochladen (ab Kontoeröffnung empfohlen).",
     label_visibility="visible")
 
 if uploaded_file is None:
@@ -369,6 +371,13 @@ zeile_22      = d.get('zeile_22_other_losses_eur', abs(d.get('options_loss_eur',
 zeile_23      = d.get('zeile_23_stock_losses_eur', abs(d.get('stocks_loss_eur', 0)))
 quellensteuer = d.get('withholding_tax_eur', 0)
 
+# Zuflussprinzip data
+audit = d.get('audit', {})
+cross_year_premium = audit.get('cross_year_premium_eur', 0)
+cross_year_by_year = audit.get('cross_year_by_year', {})
+cross_year_details = [det for det in audit.get('stillhalter_details', []) if det.get('is_cross_year')]
+has_cross_year = len(cross_year_details) > 0
+
 # ── Flex Query Hinweis ────────────────────────────────────────────────────────
 
 if not d.get('has_trade_price', False):
@@ -379,14 +388,47 @@ if not d.get('has_trade_price', False):
 </div>
 """, unsafe_allow_html=True)
 
+# ── Stillhalter Warnung ──────────────────────────────────────────────────────
+
+unmatched = d.get('audit', {}).get('stillhalter_unmatched', [])
+if unmatched:
+    details = ", ".join(f"{u['symbol']} ({u['expiry']})" for u in unmatched)
+    st.markdown(f"""
+<div style="background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #fb923c;">Stillhalter-Warnung:</strong> Für {len(unmatched)} Call-Assignment(s) wurde der ursprüngliche Optionsverkauf nicht gefunden: <strong>{details}</strong>.
+    Die Option wurde vermutlich in einem Vorjahr verkauft (Prämie kassiert) und erst im Steuerjahr assigned. Ohne den Original-Trade kann die Prämie nicht berechnet und verbleibt in Topf 1 (Aktien) statt Topf 2 (Sonstiges).
+    <br><em>Lösung:</em> Das Vorjahres-XML, in dem die Option verkauft wurde, oben als "Vorjahres-XML" hochladen.
+</div>
+""", unsafe_allow_html=True)
+
+# ── Zuflussprinzip Toggle ────────────────────────────────────────────────────
+
+zuflussprinzip_aktiv = False
+if has_cross_year:
+    st.markdown(f"""
+<div style="background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #a855f7;">Zuflussprinzip (BMF Rn. 27-28):</strong> {len(cross_year_details)} Stillhalterprämie(n) erkannt, deren Optionsverkauf in einem Vorjahr stattfand ({fmt_de(cross_year_premium)} EUR). Nach dem Zuflussprinzip gehören diese steuerlich in das Verkaufsjahr der Option.
+</div>
+""", unsafe_allow_html=True)
+    zuflussprinzip_aktiv = st.checkbox(
+        "Zuflussprinzip anwenden (BMF Rn. 27-28)",
+        value=False,
+        help="Verschiebt Stillhalterprämien aus Vorjahren aus dem aktuellen Steuerjahr heraus. "
+             "Diese Prämien gehören in die Steuererklärung des jeweiligen Vorjahres.")
+
+# Adjusted values for Zuflussprinzip
+adj_cross = cross_year_premium if zuflussprinzip_aktiv else 0
+adj_topf_2 = topf_2 - adj_cross
+adj_zeile_19 = zeile_19 - adj_cross
+
 # ── Hero ─────────────────────────────────────────────────────────────────────
 
-hero_color = "#4ade80" if zeile_19 >= 0 else "#f87171"
+hero_color = "#4ade80" if adj_zeile_19 >= 0 else "#f87171"
 st.markdown(f"""
 <div class="hero-card">
-    <div class="hero-label">Zeile 19 · Ausländische Kapitalerträge (Netto)</div>
-    <div class="hero-value" style="color:{hero_color}">{fmt(zeile_19)}</div>
-    <div class="hero-formula">Topf 1 ({fmt(topf_1)}) + Topf 2 ({fmt(topf_2)})</div>
+    <div class="hero-label">Zeile 19 · Ausländische Kapitalerträge (Netto){"  · Zuflussprinzip" if zuflussprinzip_aktiv else ""}</div>
+    <div class="hero-value" style="color:{hero_color}">{fmt(adj_zeile_19)}</div>
+    <div class="hero-formula">Topf 1 ({fmt(topf_1)}) + Topf 2 ({fmt(adj_topf_2)})</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -411,9 +453,9 @@ st.markdown(
     '<div class="metric-grid">'
     + metric_card("Dividenden", d['dividends_eur'])
     + metric_card("Zinsen (netto)", d['interest_eur'])
-    + metric_card("Optionsgewinne", d['options_gain_eur'], "gain")
+    + metric_card("Optionsgewinne", d['options_gain_eur'] - adj_cross, "gain")
     + metric_card("Optionsverluste", d['options_loss_eur'], "loss")
-    + metric_card("Saldo Sonstiges", topf_2, "saldo")
+    + metric_card("Saldo Sonstiges", adj_topf_2, "saldo")
     + '</div>',
     unsafe_allow_html=True
 )
@@ -466,7 +508,7 @@ if fx_results:
 section_title("Anlage KAP · Eintragungen")
 
 st.markdown(
-    kap_row("Z. 19", "Ausländische Kapitalerträge (Netto)", zeile_19, highlight=True)
+    kap_row("Z. 19", "Ausländische Kapitalerträge (Netto)", adj_zeile_19, highlight=True)
     + kap_row("Z. 20", "Davon: Aktiengewinne", zeile_20)
     + kap_row("Z. 22", "Verluste ohne Aktien", zeile_22, force_positive=True)
     + kap_row("Z. 23", "Aktienverluste", zeile_23, force_positive=True)
@@ -474,11 +516,41 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ── Zuflussprinzip Details ────────────────────────────────────────────────────
+
+if zuflussprinzip_aktiv and cross_year_details:
+    section_title("Zuflussprinzip · Vorjahres-Prämien (BMF Rn. 27-28)")
+    st.markdown("""
+<div style="background: rgba(168,85,247,0.06); border: 1px solid rgba(168,85,247,0.2); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.82rem; color: #94a3b8;">
+    Die folgenden Stillhalterprämien wurden <strong>aus dem aktuellen Steuerjahr herausgerechnet</strong>,
+    da der Zufluss (= Verkauf der Option) in einem Vorjahr stattfand.
+    Diese Beträge gehören in die <strong>Steuererklärung des jeweiligen Vorjahres</strong>.
+</div>
+""", unsafe_allow_html=True)
+
+    detail_table = "| Symbol | Strike | Verkauf (Zufluss) | Assignment | Prämie (EUR) |\n"
+    detail_table += "|--------|--------|-------------------|------------|-------------:|\n"
+    for det in cross_year_details:
+        detail_table += (f"| {det['symbol']} | {det['strike']} | "
+                        f"{det['orig_sell_date']} | "
+                        f"{det['assignment_date']} | "
+                        f"{fmt_de(det['premium_eur'])} |\n")
+    st.markdown(detail_table)
+
+    st.markdown("**Zusammenfassung nach Zuflussjahr:**")
+    year_table = "| Steuerjahr | Prämien-Summe (EUR) | Hinweis |\n"
+    year_table += "|:----------:|--------------------:|--------|\n"
+    for year in sorted(cross_year_by_year.keys()):
+        year_table += f"| {year} | {fmt_de(cross_year_by_year[year])} | In Steuererklärung {year} eintragen |\n"
+    st.markdown(year_table)
+
+    st.info(f"**Gesamtbetrag Vorjahres-Prämien:** {fmt_de(cross_year_premium)} EUR — "
+            f"um diesen Betrag wurde Zeile 19 im aktuellen Jahr reduziert.")
+
 # ── Steuerliche Regeln & Berechnungsmethodik ─────────────────────────────────
 
 section_title("Steuerliche Regeln & Berechnungsmethodik")
 
-audit = d.get('audit', {})
 sh_count = audit.get('stillhalter_count', 0)
 sh_eur = audit.get('stillhalter_premium_eur', 0)
 base_curr = d.get('base_currency', 'USD')
