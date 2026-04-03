@@ -312,13 +312,24 @@ st.markdown("""
 uploaded_file = st.file_uploader("IBKR Flex Query hochladen - Steuerjahr (XML)", type="xml",
                                   label_visibility="collapsed")
 fx_history_files = st.file_uploader(
-    "Optional: Vorjahres-XMLs für exakte FX- & Stillhalter-Berechnung",
+    "Optional: Vorjahres-XMLs für exakte Stillhalter-Berechnung",
     type="xml", accept_multiple_files=True,
-    help="Vorjahres-XMLs werden benötigt für:\n"
-         "• **Stillhalterprämien:** Wenn Call-Optionen in einem Vorjahr verkauft und im Steuerjahr "
-         "assigned wurden, wird der Original-SELL-Trade für die korrekte Topf-Zuordnung benötigt.\n"
-         "• **Fremdwährung:** Exakte FIFO-Berechnung der Währungsgewinne/-verluste.\n\n"
+    help="Vorjahres-XMLs werden benötigt wenn Call-Optionen in einem Vorjahr verkauft und im Steuerjahr "
+         "assigned wurden. Der Original-SELL-Trade wird für die korrekte Stillhalterprämien-Zuordnung "
+         "(Topf 1 → Topf 2) benötigt.\n\n"
          "Flex Query XMLs der Vorjahre hochladen (ab Kontoeröffnung empfohlen).",
+    label_visibility="visible")
+ibkr_csv_file = st.file_uploader(
+    "Optional: IBKR Standard-Bericht (CSV) für exakte FX-Werte & Plausibilitätscheck",
+    type="csv",
+    help="**Was ist das?** Der Standard-Kontoauszug von IBKR enthält per-Settlement "
+         "Forex-G&V-Details, die in der Flex Query XML nicht verfügbar sind.\n\n"
+         "**So erstellen (30 Sek.):**\n"
+         "1. IBKR einloggen → Berichte/Reports → Kontoauszüge/Statements\n"
+         "2. Bericht: **Übersicht: realisierter G&V**\n"
+         "3. Zeitraum: **01.01.2025 – 31.12.2025**\n"
+         "4. Format: **CSV** → Erstellen/Run\n\n"
+         "Liefert exakte Devisengewinne/-verluste und dient als Plausibilitätscheck für alle Kategorien.",
     label_visibility="visible")
 
 if uploaded_file is None:
@@ -347,6 +358,13 @@ with st.spinner("Berechne Steuerreport…"):
                 f.write(hf.getbuffer())
             history_paths.append(hp)
 
+        # Save CSV report if provided
+        csv_report_path = None
+        if ibkr_csv_file is not None:
+            csv_report_path = os.path.join(tmp, "ibkr_report.csv")
+            with open(csv_report_path, "wb") as f:
+                f.write(ibkr_csv_file.getbuffer())
+
         try:
             if history_paths:
                 # Multi-XML: merge FX history from all files
@@ -354,7 +372,7 @@ with st.spinner("Berechne Steuerreport…"):
                 extract_ibkr_data.extract_fx_multi_xml(all_xmls, tmp)
             else:
                 extract_ibkr_data.parse_ibkr_xml(xml_path, tmp)
-            d = calculate_tax_report.calculate_tax(tmp)
+            d = calculate_tax_report.calculate_tax(tmp, fx_csv_path=csv_report_path)
         except Exception as e:
             st.error(f"Fehler beim Verarbeiten: {e}")
             st.exception(e)
@@ -467,8 +485,13 @@ fx_total_gain = d.get('fx_total_gain', 0)
 fx_total_loss = d.get('fx_total_loss', 0)
 fx_mtm = d.get('fx_mtm', {})
 
+fx_source = d.get('fx_source', 'none')
+
 if fx_results:
-    section_title("Fremdwährungs-Gewinne/Verluste (FIFO)")
+    if fx_source == 'csv':
+        section_title("Fremdwährungs-Gewinne/Verluste (IBKR-Bericht)")
+    else:
+        section_title("Fremdwährungs-Gewinne/Verluste (FIFO-Approximation)")
 
     st.markdown(
         '<div class="metric-grid">'
@@ -489,19 +512,58 @@ if fx_results:
         fx_tgl = d.get('fx_translation', 0)
         if fx_tgl != 0:
             st.markdown(f"**IBKR Referenz (fxTranslationGainLoss):** {fmt_de(fx_tgl)} EUR")
-        fx_prior = d.get('fx_has_prior_data', False)
-        if fx_prior:
-            st.success("Multi-Year-Daten erkannt - FIFO-Lots werden vollständig ab Kontoeröffnung aufgebaut. "
-                       "Die Berechnung ist exakt.")
+
+        if fx_source == 'csv':
+            st.success("Exakte FX-Werte aus IBKR Standard-Bericht (per-Settlement FIFO, alle Währungen).")
         else:
-            st.warning("**Nur Steuerjahr geladen.** Fremdwährungs-Anfangsbestände werden zum 01.01.-Kurs "
-                       "als Anschaffung angesetzt (Vereinfachung). Für exakte FIFO-Berechnung: "
-                       "Flex Query ab **Kontoeröffnung** laden (z.B. 2021-2025). "
-                       "Die Steuerberechnung (Aktien, Optionen, Dividenden etc.) bleibt davon unberührt - "
-                       "nur die Fremdwährungs-Gewinne/Verluste werden genauer.")
+            fx_prior = d.get('fx_has_prior_data', False)
+            if fx_prior:
+                st.info("FIFO-Approximation aus Flex Query (Tagesraten-Substitution). "
+                        "Für exakte Werte: IBKR Standard-Bericht (CSV) oben hochladen.")
+            else:
+                st.warning("**Nur Steuerjahr geladen.** FIFO-Approximation. "
+                           "Für exakte Werte: IBKR Standard-Bericht (CSV) oben hochladen.")
         st.info("**Rechtsgrundlage:** BMF-Schreiben Rn. 131 - verzinsliches Fremdwährungsguthaben, "
                 "§20 Abs. 2 S. 1 Nr. 7 EStG (Anlage KAP, Topf 2). FIFO-Methode (§20 Abs. 4 S. 7). "
                 "In Topf 2 enthalten.")
+
+# ── Plausibilitätscheck (wenn CSV hochgeladen) ─────────────────────────────
+csv_cats = d.get('csv_category_totals', {})
+if csv_cats:
+    section_title("Plausibilitätscheck (IBKR-Bericht vs. Berechnung)")
+    # Map IBKR categories to our Topf structure
+    our_stk_gain = d['stocks_gain_eur'] + d['audit'].get('stillhalter_premium_eur', 0)
+    our_stk_loss = d['stocks_loss_eur']
+    ibkr_topf2_cats = ["Aktien- und Indexoptionen", "Futures", "Optionen auf Futures (Future-Style)",
+                        "Optionen auf Futures", "Anleihen", "Treasury Bills"]
+    our_topf2_gain = d['options_gain_eur'] - d['audit'].get('stillhalter_premium_eur', 0) - d.get('fx_total_gain', 0)
+    our_topf2_loss = d['options_loss_eur'] - d.get('fx_total_loss', 0)
+    ibkr_topf2_gain = sum(csv_cats.get(c, {}).get('gain', 0) for c in ibkr_topf2_cats)
+    ibkr_topf2_loss = sum(csv_cats.get(c, {}).get('loss', 0) for c in ibkr_topf2_cats)
+
+    ibkr_stk = csv_cats.get('Aktien', {})
+    ibkr_fx = csv_cats.get('Devisen', {})
+
+    rows = [
+        ("Aktien (Topf 1) Netto", ibkr_stk.get('net', 0), our_stk_gain + our_stk_loss),
+        ("Sonstiges (Topf 2) Netto", ibkr_topf2_gain + ibkr_topf2_loss, our_topf2_gain + our_topf2_loss),
+        ("FX (Devisen) Netto", ibkr_fx.get('net', 0), fx_total_gain + fx_total_loss),
+    ]
+
+    check_table = "| Kategorie | IBKR-Bericht | Unsere Berechnung | Differenz |\n|-----------|-------------|-------------------|----------|\n"
+    all_match = True
+    for label, ibkr_val, our_val in rows:
+        diff = our_val - ibkr_val
+        match = abs(diff) < 1.0
+        if not match:
+            all_match = False
+        icon = "" if match else " **(!)**"
+        check_table += f"| {label} | {fmt_de(ibkr_val)} | {fmt_de(our_val)} | {fmt_de(diff)}{icon} |\n"
+    st.markdown(check_table)
+    if all_match:
+        st.success("Alle Kategorien stimmen mit dem IBKR-Bericht überein.")
+    else:
+        st.info("Kleine Abweichungen sind normal (FX-Rundung bei der Umrechnung einzelner Trades).")
 
 # ── Anlage KAP Zeilen ────────────────────────────────────────────────────────
 
