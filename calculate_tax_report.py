@@ -781,19 +781,13 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     csv_category_totals = {}  # plausibility data from CSV report
     csv_income_totals = {}  # dividends/interest/withholding tax from CSV report
 
-    # Parse IBKR standard CSV report (plausibility data always, FX only for EUR-base)
+    # Parse IBKR standard CSV report (always for plausibility check)
     if fx_csv_path and os.path.exists(fx_csv_path):
         csv_data = parse_ibkr_csv_report(fx_csv_path)
         csv_category_totals = csv_data['category_totals']
         csv_income_totals = csv_data.get('income_totals', {})
-        if base_currency == 'EUR':
-            fx_results = csv_data['fx_results']
-            fx_total_gain = csv_data['fx_total_gain']
-            fx_total_loss = csv_data['fx_total_loss']
-            fx_source = 'csv'
-            print(f"FX: Exakte Werte aus IBKR Standard-Bericht übernommen.")
 
-    # Option B: Exact FX from XML FxTransactions (IBKR's own FIFO, per-transaction realizedPL)
+    # Option A: Exact FX from XML FxTransactions (IBKR's own FIFO, per-transaction realizedPL)
     fx_pnl_path = os.path.join(ib_tax_dir, 'fx_realized_pnl.csv')
     if not fx_results and os.path.exists(fx_pnl_path) and base_currency == 'EUR':
         fx_pnl_rows = load_csv(fx_pnl_path)
@@ -820,6 +814,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             fx_total_loss = sum(d['loss'] for d in fx_by_curr.values())
             fx_source = 'xml'
             print(f"FX: Exakte Werte aus XML FxTransactions übernommen ({len(fx_pnl_rows)} Einträge).")
+
+    # Option B: Exact FX from IBKR CSV report (same data as XML FxTransactions)
+    if not fx_results and fx_csv_path and os.path.exists(fx_csv_path) and base_currency == 'EUR':
+        fx_results = csv_data['fx_results']
+        fx_total_gain = csv_data['fx_total_gain']
+        fx_total_loss = csv_data['fx_total_loss']
+        fx_source = 'csv'
+        print(f"FX: Exakte Werte aus IBKR Standard-Bericht übernommen.")
 
     # Option C: FIFO approximation from fx_transactions.csv (least accurate)
     fx_path = os.path.join(ib_tax_dir, 'fx_transactions.csv')
