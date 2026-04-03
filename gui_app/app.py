@@ -305,41 +305,60 @@ st.markdown('<p class="page-sub">Anlage KAP · Interactive Brokers Flex Query</p
 
 st.markdown("""
 <div style="background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.2); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
-    <strong style="color: #60a5fa;">Datenschutz:</strong> Alle Berechnungen erfolgen ausschließlich lokal in Ihrem Browser. Es werden keine Daten an Server übertragen, gespeichert oder an Dritte weitergegeben.
+    <strong style="color: #60a5fa;">Datenschutz:</strong> Alle Berechnungen erfolgen ausschließlich lokal im Browser. Es werden keine Daten an Server übertragen, gespeichert oder an Dritte weitergegeben.
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div style="background: rgba(59,130,246,0.08); border-left: 3px solid #3b82f6; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.82rem; color: #cbd5e1; line-height: 1.6;">
+    <strong style="color: #60a5fa; font-size: 0.9rem;">1. Flex Query XML (Pflicht)</strong><br>
+    Die Hauptdatenquelle. Enthält alle Trades, Dividenden, Zinsen, Quellensteuer und Stillhalter-Details.
+    Daraus werden die Anlage KAP Zeilen berechnet (Topf 1 Aktien, Topf 2 Sonstiges, Stillhalterprämien-Separation).<br>
+    <span style="color: #64748b;">IBKR &rarr; Performance &amp; Berichte &rarr; Flex-Abfragen &rarr; XML exportieren (Zeitraum: 01.01.&ndash;31.12.2025)</span>
 </div>
 """, unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader("IBKR Flex Query hochladen - Steuerjahr (XML)", type="xml",
                                   label_visibility="collapsed")
+
+st.markdown("""
+<div style="background: rgba(168,85,247,0.06); border-left: 3px solid #a855f7; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.82rem; color: #cbd5e1; line-height: 1.6;">
+    <strong style="color: #c084fc; font-size: 0.9rem;">2. Vorjahres-XMLs (Optional)</strong><br>
+    Nur nötig wenn Covered Calls über den Jahreswechsel gehalten wurden. Beispiel: Call-Option 2024 verkauft,
+    2025 durch Assignment geschlossen. Die Stillhalterprämie muss per Zuflussprinzip (BMF Rn. 25, 33)
+    dem Verkaufsjahr zugeordnet werden. Dafür wird der Original-Trade aus der Vorjahres-XML benötigt.
+</div>
+""", unsafe_allow_html=True)
+
 fx_history_files = st.file_uploader(
     "Optional: Vorjahres-XMLs für exakte Stillhalter-Berechnung",
     type="xml", accept_multiple_files=True,
-    help="Vorjahres-XMLs werden benötigt wenn Call-Optionen in einem Vorjahr verkauft und im Steuerjahr "
-         "assigned wurden. Der Original-SELL-Trade wird für die korrekte Stillhalterprämien-Zuordnung "
-         "(Topf 1 → Topf 2) benötigt.\n\n"
-         "Flex Query XMLs der Vorjahre hochladen (ab Kontoeröffnung empfohlen).",
     label_visibility="visible")
+
+st.markdown("""
+<div style="background: rgba(16,185,129,0.08); border-left: 3px solid #10b981; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.82rem; color: #cbd5e1; line-height: 1.6;">
+    <strong style="color: #34d399; font-size: 0.9rem;">3. IBKR Standard-Bericht CSV (Empfohlen)</strong><br>
+    Liefert <strong style="color: #6ee7b7;">exakte Devisengewinne/-verluste</strong>: IBKR berechnet intern FIFO per-Settlement
+    für jede einzelne Fremdwährungsbewegung. Diese Daten sind in der Flex Query XML leider nicht enthalten.<br><br>
+    <strong style="color: #6ee7b7;">Automatischer Plausibilitätscheck:</strong>
+    Der IBKR-Bericht enthält aggregierte Summen pro Kategorie (Aktien, Optionen, Futures, Anleihen, Devisen).
+    Dieses Tool berechnet jeden einzelnen Trade separat aus der Flex Query XML, inklusive korrekter Topf-Zuordnung,
+    Stillhalterprämien-Separation und Währungsumrechnung. Die so berechneten Einzelwerte werden dann aufsummiert und
+    automatisch mit den aggregierten IBKR-Summen verglichen. Cent-genaue Übereinstimmung bei Aktien und Optionen/Futures ist das Ziel.<br><br>
+    <span style="background: rgba(16,185,129,0.12); border-radius: 6px; padding: 0.4rem 0.6rem; display: inline-block; margin-top: 0.2rem; color: #94a3b8;">
+    <strong style="color: #a7f3d0;">So erstellen:</strong>
+    IBKR &rarr; Performance &amp; Berichte &rarr; Kontoauszüge &rarr;
+    <strong>Übersicht: realisierter G&amp;V</strong> &rarr; Zeitraum 01.01.&ndash;31.12.2025 &rarr; Format: CSV &rarr; Erstellen
+    </span>
+</div>
+""", unsafe_allow_html=True)
+
 ibkr_csv_file = st.file_uploader(
-    "Optional: IBKR Standard-Bericht (CSV) für exakte FX-Werte & Plausibilitätscheck",
+    "Empfohlen: IBKR Standard-Bericht (CSV) für exakte FX-Werte & Plausibilitätscheck",
     type="csv",
-    help="**Was ist das?** Der Standard-Kontoauszug von IBKR enthält per-Settlement "
-         "Forex-G&V-Details, die in der Flex Query XML nicht verfügbar sind.\n\n"
-         "**So erstellen (30 Sek.):**\n"
-         "1. IBKR einloggen → Berichte/Reports → Kontoauszüge/Statements\n"
-         "2. Bericht: **Übersicht: realisierter G&V**\n"
-         "3. Zeitraum: **01.01.2025 – 31.12.2025**\n"
-         "4. Format: **CSV** → Erstellen/Run\n\n"
-         "Liefert exakte Devisengewinne/-verluste und dient als Plausibilitätscheck für alle Kategorien.",
     label_visibility="visible")
 
 if uploaded_file is None:
-    st.markdown("""
-    <div style="text-align:center; padding: 3rem 1rem; color: #334155;">
-        <div style="font-size:3rem; margin-bottom:1rem;">📂</div>
-        <div style="font-size:1rem; font-weight:600; color:#475569;">XML-Datei hochladen</div>
-        <div style="font-size:0.85rem; margin-top:0.4rem;">IBKR → Reports → Flex Query → XML exportieren</div>
-    </div>
-    """, unsafe_allow_html=True)
     st.stop()
 
 # ── Processing ───────────────────────────────────────────────────────────────
