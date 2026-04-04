@@ -1034,6 +1034,9 @@ st.download_button(
     use_container_width=True
 )
 
+with st.expander("Report als Text anzeigen (zum Kopieren)"):
+    st.code(report_text, language=None)
+
 # ── Rechtliche Hinweise ──────────────────────────────────────────────────────
 
 section_title("Rechtliche Hinweise")
