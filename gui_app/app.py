@@ -431,7 +431,7 @@ if unmatched:
     details = ", ".join(f"{u['symbol']} ({u['expiry']})" for u in unmatched)
     st.markdown(f"""
 <div style="background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
-    <strong style="color: #fb923c;">Stillhalter-Warnung:</strong> Für {len(unmatched)} Call-Assignment(s) wurde der ursprüngliche Optionsverkauf nicht gefunden: <strong>{details}</strong>.
+    <strong style="color: #fb923c;">Stillhalter-Warnung:</strong> Für {len(unmatched)} Assignment(s) wurde der ursprüngliche Optionsverkauf nicht gefunden: <strong>{details}</strong>.
     Die Option wurde vermutlich in einem Vorjahr verkauft (Prämie kassiert) und erst im Steuerjahr assigned. Ohne den Original-Trade kann die Prämie nicht berechnet und verbleibt in Topf 1 (Aktien) statt Topf 2 (Sonstiges).
     <br><em>Lösung:</em> Das Vorjahres-XML, in dem die Option verkauft wurde, oben als "Vorjahres-XML" hochladen.
 </div>
@@ -738,24 +738,16 @@ Beim Halten von Fremdwährungsguthaben (z.B. USD) auf einem verzinslichen Konto 
 
 ---
 
-### Covered Calls  - Stillhalterprämien (BMF Rn. 25–35)
+### Stillhalterprämien bei Assignments (BMF Rn. 25–35)
 
-Wenn Sie eine Call-Option verkaufen (Stillhalter) und diese ausgeübt wird (Assignment), muss die Prämie steuerlich korrekt zugeordnet werden:
+Wenn Sie eine Option verkaufen (Stillhalter) und diese ausgeübt wird (Assignment), muss die Prämie steuerlich korrekt zugeordnet werden:
 
-- **Prämie** = laufende Einnahmen nach §20 Abs. 1 Nr. 11 → gehört in **Topf 2** (nicht Aktiengewinn)
-- **Aktienverkauf** = Veräußerungsgeschäft nach §20 Abs. 2 Nr. 1 → gehört in **Topf 1**
+- **Prämie** = laufende Einnahmen nach §20 Abs. 1 Nr. 11 → gehört in **Topf 2**
+- **Aktientransaktion** = Veräußerung (Call, Rn. 26) bzw. Anschaffung (Put, Rn. 33) nach §20 Abs. 2 → gehört in **Topf 1**
 
-IBKR bündelt beides im Aktien-Trade. Dieses Tool erkennt Assignments automatisch und trennt die Prämie heraus.
+Bei **beiden** Assignment-Typen gilt laut BMF: „Die vereinnahmte Optionsprämie wird bei der Ermittlung des Veräußerungsgewinns **nicht berücksichtigt**." IBKR bündelt die Prämie jedoch im Aktien-Trade (Call: im Verkaufserlös, Put: in den reduzierten Anschaffungskosten). Dieses Tool erkennt Assignments automatisch und trennt die Prämie heraus.
 
-{"**In Ihrem Report:** " + str(sh_count) + " Call-Assignments erkannt, " + fmt_de(sh_eur) + " EUR Stillhalterprämien von Topf 1 nach Topf 2 verschoben." if sh_count > 0 else "**In Ihrem Report:** Keine Call-Assignments erkannt."}
-
----
-
-### Put-Assignments (BMF Rn. 33)
-
-Bei Ausübung einer verkauften Put-Option kaufen Sie die Aktie zum Strike-Preis. Die erhaltene Prämie **mindert die Anschaffungskosten** der Aktie  - sie wird also nicht sofort als Ertrag erfasst, sondern verringert den Einstandspreis. Der steuerliche Effekt zeigt sich erst beim späteren Verkauf der Aktie.
-
-IBKR berücksichtigt dies korrekt über die FIFO-Kostenbasis  - keine manuelle Korrektur nötig.
+{"**In Ihrem Report:** " + str(sh_count) + " Assignments erkannt (Call + Put), " + fmt_de(sh_eur) + " EUR Stillhalterprämien von Topf 1 nach Topf 2 verschoben." if sh_count > 0 else "**In Ihrem Report:** Keine Assignments erkannt."}
 
 ---
 
@@ -827,7 +819,7 @@ if fx_results:
 sh_export = ""
 if sh_count > 0:
     sh_export = f"\nSTILLHALTERPRÄMIEN (BMF Rn. 25-35)\n"
-    sh_export += f"  {sh_count} Call-Assignment(s) erkannt\n"
+    sh_export += f"  {sh_count} Assignment(s) erkannt\n"
     sh_export += f"  Prämien umgebucht:     {fmt_de(sh_eur):>14} EUR\n"
     sh_export += f"  (Von Topf 1 nach Topf 2 verschoben)\n"
 
