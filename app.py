@@ -609,7 +609,8 @@ if fx_results:
 csv_cats = d.get('csv_category_totals', {})
 if csv_cats:
     section_title("Plausibilitätscheck (IBKR-Bericht vs. Berechnung)")
-    our_stk_gain = d['stocks_gain_eur'] + d['audit'].get('stillhalter_premium_eur', 0)
+    cross_put = d['audit'].get('cross_year_put_total', 0)
+    our_stk_gain = d['stocks_gain_eur'] + d['audit'].get('stillhalter_premium_eur', 0) + cross_put
     our_stk_loss = d['stocks_loss_eur']
     ibkr_topf2_cats = ["Aktien- und Indexoptionen", "Futures", "Optionen auf Futures (Future-Style)",
                         "Optionen auf Futures", "Anleihen", "Treasury Bills"]
