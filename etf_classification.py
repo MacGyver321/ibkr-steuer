@@ -273,6 +273,8 @@ def get_classification(isin: str):
 
 def lookup_by_ticker(ticker: str):
     """Lookup ETF by ticker symbol. Returns same dict as get_etf_info or None."""
+    if not ticker:
+        return None
     isin = TICKER_TO_ISIN.get(ticker.upper())
     if isin is None:
         return None

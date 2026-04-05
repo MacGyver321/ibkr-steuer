@@ -515,7 +515,7 @@ fx_corr_total = d.get('fx_correction_total', 0)
 fx_corr_by_topf = d.get('fx_correction_by_topf', {})
 tageskurs_aktiv = False
 
-if abs(fx_corr_total) > 0.01 and has_etf_data is not None:
+if abs(fx_corr_total) > 0.01:
     st.markdown(f"""
 <div style="background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8; line-height: 1.6;">
     <strong style="color: #fb923c;">Tageskurs-Methode (§20 Abs. 4 S. 1 EStG):</strong>

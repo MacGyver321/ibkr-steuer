@@ -701,7 +701,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 cls = get_classification(underlying_isin)
                 if cls and cls != 'no_invstg':
                     etf_premium += det['premium_eur']
-                    # Also adjust per-ISIN tracking
+                    # Adjust per-ISIN tracking (keeps etf_by_isin in sync with etf_invstg_gain)
+                    # Both must be adjusted: etf_invstg_gain for total, etf_by_isin for per-ISIN TFS
                     if underlying_isin in etf_by_isin:
                         etf_by_isin[underlying_isin]['gain'] -= det['premium_eur']
                     continue
@@ -863,6 +864,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     cls = get_classification(underlying_isin)
                     if cls and cls != 'no_invstg':
                         etf_corr += c['correction_eur']
+                        # Adjust per-ISIN (keeps in sync with etf_invstg_gain)
                         if underlying_isin in etf_by_isin:
                             etf_by_isin[underlying_isin]['gain'] -= c['correction_eur']
                         continue
@@ -959,8 +961,10 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             # Net with dividends as per German tax law
             if is_etf_fund:
                 etf_dividends_eur += amount_eur
-                if fund_isin in etf_by_isin:
-                    etf_by_isin[fund_isin]['div'] += amount_eur
+                if fund_isin not in etf_by_isin:
+                    info = get_etf_info(fund_isin)
+                    etf_by_isin[fund_isin] = {'ticker': info['ticker'] if info else fund_isin[:12], 'name': info['name'] if info else '', 'classification': cls or 'sonstiger_fonds', 'gain': 0.0, 'loss': 0.0, 'div': 0.0, 'wht': 0.0}
+                etf_by_isin[fund_isin]['div'] += amount_eur
             else:
                 dividends_eur += amount_eur
         elif code in ['INTR', 'CINT', 'INTP', 'DINT']:
@@ -1236,8 +1240,6 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if idx >= len(fx_dates):
                 return fx_map[fx_dates[-1]]
             return fx_map[fx_dates[idx - 1]]
-
-        fx_corr_by_topf = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
         lots_processed = 0
 
         for lot in closed_lots:
@@ -1363,7 +1365,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             "etf_net_taxable_eur": etf_net_taxable,
             "etf_by_isin": etf_by_isin,
             "etf_unknown_isins": etf_unknown_isins,
-            "etf_stillhalter_premium_eur": etf_stillhalter_premium_eur if 'etf_stillhalter_premium_eur' in dir() else 0.0,
+            "etf_stillhalter_premium_eur": etf_stillhalter_premium_eur,
         },
         # Plausibility Metadata
         "has_trade_price": has_trade_price,
