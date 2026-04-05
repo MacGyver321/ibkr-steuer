@@ -189,6 +189,19 @@ st.markdown("""
         font-weight: 600;
     }
 
+    /* ── KAP-INV hero card (greenish) ── */
+    .hero-card-inv {
+        background: linear-gradient(135deg, #1a3a2f 0%, #1a2d2a 100%);
+        border: 1px solid rgba(74,222,128,0.25);
+        border-radius: 18px;
+        padding: 1.75rem 1.5rem;
+        margin: 1.5rem 0;
+        text-align: center;
+    }
+    .hero-card-inv .hero-label {
+        color: #4ade80;
+    }
+
     /* ── Audit expander ── */
     [data-testid="stExpander"] {
         border: 1px solid rgba(255,255,255,0.07) !important;
@@ -454,6 +467,82 @@ adj_cross = cross_year_premium if zuflussprinzip_aktiv else 0
 adj_topf_2 = topf_2 - adj_cross
 adj_zeile_19 = zeile_19 - adj_cross
 
+# ── InvStG Toggle (vor Hero, damit Adjustments in Zeile 19 einfließen) ───────
+
+kap_inv = d.get('kap_inv', {})
+etf_by_isin = kap_inv.get('etf_by_isin', {})
+has_etf_data = len(etf_by_isin) > 0
+
+invstg_aktiv = False
+if has_etf_data:
+    n_aktien = sum(1 for v in etf_by_isin.values() if v.get('classification') == 'aktienfonds')
+    n_sonst = sum(1 for v in etf_by_isin.values() if v.get('classification') != 'aktienfonds')
+    etf_tickers = ", ".join(sorted(v.get('ticker', '?') for v in etf_by_isin.values()))
+
+    st.markdown(f"""
+<div style="background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #4ade80;">InvStG-Klassifizierung (§2 InvStG):</strong> {len(etf_by_isin)} ETFs in Ihrer XML erkannt, die nach dem Investmentsteuergesetz als Investmentfonds gelten und auf <strong>Anlage KAP-INV</strong> gemeldet werden (nicht auf Anlage KAP).
+    Davon {n_aktien} Aktienfonds (30% TFS) und {n_sonst} sonstige Fonds (0% TFS).<br>
+    <span style="color: #64748b; font-size: 0.75rem;">Betroffene ETFs: {etf_tickers}</span>
+</div>
+""", unsafe_allow_html=True)
+    invstg_aktiv = st.checkbox(
+        "InvStG-Klassifizierung anwenden (Anlage KAP-INV)",
+        value=True,
+        help="ETFs werden als Investmentfonds nach InvStG behandelt: separate Meldung auf Anlage KAP-INV, "
+             "Teilfreistellung (30% für Aktienfonds, 0% für sonstige). "
+             "Deaktivieren = alle ETFs wie normale Aktien auf Anlage KAP behandeln.")
+
+    if not invstg_aktiv:
+        etf_raw_net = kap_inv.get('etf_gain_raw_eur', 0) + kap_inv.get('etf_loss_raw_eur', 0)
+        topf_1 += etf_raw_net
+        zeile_19 += etf_raw_net
+        adj_zeile_19 += etf_raw_net
+        zeile_20 += max(kap_inv.get('etf_gain_raw_eur', 0), 0)
+        zeile_23 += abs(min(kap_inv.get('etf_loss_raw_eur', 0), 0))
+        adj_topf_2 += kap_inv.get('etf_dividends_raw_eur', 0)
+        adj_zeile_19 += kap_inv.get('etf_dividends_raw_eur', 0)
+        zeile_19 += kap_inv.get('etf_dividends_raw_eur', 0)
+        quellensteuer += kap_inv.get('etf_wht_eur', 0)
+
+# ── Tageskurs-Korrektur (§20 Abs. 4 S. 1 EStG) ──────────────────────────────
+
+fx_corr_total = d.get('fx_correction_total', 0)
+fx_corr_by_topf = d.get('fx_correction_by_topf', {})
+tageskurs_aktiv = False
+
+if abs(fx_corr_total) > 0.01 and has_etf_data is not None:
+    st.markdown(f"""
+<div style="background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8; line-height: 1.6;">
+    <strong style="color: #fb923c;">Tageskurs-Methode (§20 Abs. 4 S. 1 EStG):</strong>
+    <em>"Bei nicht in Euro getätigten Geschäften sind die Einnahmen im Zeitpunkt der Veräußerung und die Anschaffungskosten im Zeitpunkt der Anschaffung in Euro umzurechnen."</em><br>
+    IBKR rechnet den gesamten Netto-Gewinn zum Schlusskurs um. Das Gesetz verlangt: Erlös zum Verkaufskurs, Kosten zum Kaufkurs.
+    Abweichung für {steuerjahr}: <strong style="color: #fb923c;">{"+" if fx_corr_total >= 0 else ""}{fmt_de(fx_corr_total)} EUR</strong> (CLOSED_LOT Analyse, ohne Futures*).<br>
+    <span style="color: #64748b; font-size: 0.72rem;">*Futures ausgeschlossen: Die Kostenbasis bei Futures ist der volle Kontraktwert (z.B. $200.000 bei ZT), nicht die tatsächlich gezahlte Margin. Eine FX-Korrektur auf den Notional würde massive Phantom-Gewinne/-Verluste erzeugen, die keinem realen Cashflow entsprechen.</span>
+</div>
+""", unsafe_allow_html=True)
+    tageskurs_aktiv = st.checkbox(
+        "Tageskurs-Methode anwenden (§20 Abs. 4 S. 1 EStG)",
+        value=False,
+        help="Rechnet Veräußerungserlöse und Anschaffungskosten jeweils zum FX-Kurs ihres eigenen Datums um, "
+             "statt den gesamten Netto-PnL zum Schlusskurs. Gesetzlich korrekt, aber Abweichung zur IBKR-Methode. "
+             "Nur verfügbar mit Extended Flex Query (CLOSED_LOT Daten).")
+
+    if tageskurs_aktiv:
+        corr_topf1 = fx_corr_by_topf.get('Topf1', 0)
+        corr_topf2 = fx_corr_by_topf.get('Topf2', 0)
+        tageskurs_kapinv_corr = fx_corr_by_topf.get('KAP-INV', 0)
+        topf_1 += corr_topf1
+        adj_topf_2 += corr_topf2
+        if invstg_aktiv:
+            adj_zeile_19 += corr_topf1 + corr_topf2
+            zeile_19 += corr_topf1 + corr_topf2
+        else:
+            adj_zeile_19 += fx_corr_total
+            zeile_19 += fx_corr_total
+    else:
+        tageskurs_kapinv_corr = 0
+
 # ── Basiswährung ────────────────────────────────────────────────────────────
 
 base_curr = d.get('base_currency', 'USD')
@@ -494,9 +583,10 @@ elif not xml_has_fx and fx_source == 'csv':
 # ── Hero ─────────────────────────────────────────────────────────────────────
 
 hero_color = "#4ade80" if adj_zeile_19 >= 0 else "#f87171"
+invstg_label = ""
 st.markdown(f"""
 <div class="hero-card">
-    <div class="hero-label">Zeile 19 · Ausländische Kapitalerträge (Netto){"  · Zuflussprinzip" if zuflussprinzip_aktiv else ""}</div>
+    <div class="hero-label">Zeile 19 · Ausländische Kapitalerträge (Netto){"  · Zuflussprinzip" if zuflussprinzip_aktiv else ""}{invstg_label}</div>
     <div class="hero-value" style="color:{hero_color}">{fmt(adj_zeile_19)}</div>
     <div class="hero-formula">Topf 1 ({fmt(topf_1)}) + Topf 2 ({fmt(adj_topf_2)})</div>
 </div>
@@ -504,7 +594,8 @@ st.markdown(f"""
 
 # ── Topf 1: Aktien ───────────────────────────────────────────────────────────
 
-section_title("Topf 1 · Aktien (separate Verrechnung §20 Abs. 6 S. 4 EStG)")
+topf_1_label = "Topf 1 · Aktien ohne ETF-Fonds (separate Verrechnung §20 Abs. 6 S. 4 EStG)" if (has_etf_data and invstg_aktiv) else "Topf 1 · Aktien (separate Verrechnung §20 Abs. 6 S. 4 EStG)"
+section_title(topf_1_label)
 
 st.markdown(
     '<div class="metric-grid">'
@@ -605,6 +696,96 @@ if fx_results:
                 "§20 Abs. 2 S. 1 Nr. 7 EStG (Anlage KAP, Topf 2). FIFO-Methode (§20 Abs. 4 S. 7). "
                 "In Topf 2 enthalten.")
 
+# ── Anlage KAP-INV · Investmentfonds (Detail-Anzeige) ─────────────────────────
+
+if has_etf_data and invstg_aktiv:
+    etf_gain_raw = kap_inv.get('etf_gain_raw_eur', 0)
+    etf_loss_raw = kap_inv.get('etf_loss_raw_eur', 0)
+    etf_gain_taxable = kap_inv.get('etf_gain_taxable_eur', 0)
+    etf_loss_taxable = kap_inv.get('etf_loss_taxable_eur', 0)
+    etf_div_raw = kap_inv.get('etf_dividends_raw_eur', 0)
+    etf_div_taxable = kap_inv.get('etf_dividends_taxable_eur', 0)
+    etf_wht = kap_inv.get('etf_wht_eur', 0)
+    etf_net_taxable = kap_inv.get('etf_net_taxable_eur', 0) + tageskurs_kapinv_corr
+    etf_unknown = kap_inv.get('etf_unknown_isins', [])
+    etf_stillhalter = kap_inv.get('etf_stillhalter_premium_eur', 0)
+
+if has_etf_data and invstg_aktiv:
+    section_title("Anlage KAP-INV · Investmentfonds (InvStG)")
+
+    # Manual classification for unknown ETFs — BEFORE cards so values are correct
+    if etf_unknown:
+        st.markdown(f"""
+<div style="background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #fbbf24;">Unbekannte ETFs — manuelle Klassifizierung:</strong> {len(etf_unknown)} ETF(s) nicht in der Klassifizierungstabelle.
+    Standardmässig als sonstiger Fonds (0% TFS) behandelt. Falls es sich um Aktienfonds handelt (mind. 51% Aktienquote), bitte unten korrigieren.
+</div>
+""", unsafe_allow_html=True)
+        cls_options = {"Sonstiger Fonds (0% TFS)": 0.0, "Aktienfonds (30% TFS)": 0.30, "Mischfonds (15% TFS)": 0.15}
+        for isin in etf_unknown:
+            info = etf_by_isin.get(isin, {})
+            ticker = info.get('ticker', isin[:12])
+            name = info.get('name', '')
+            label = f"{ticker} ({isin})" + (f" — {name}" if name else "")
+            choice = st.selectbox(label, list(cls_options.keys()), key=f"etf_cls_{isin}")
+            new_tfs = cls_options[choice]
+            old_tfs = info.get('tfs_rate', 0.0)
+            if new_tfs != old_tfs:
+                raw_gain = info.get('gain', 0)
+                raw_loss = info.get('loss', 0)
+                raw_div = info.get('div', 0)
+                old_gain_tax = info.get('gain_taxable', raw_gain)
+                old_loss_tax = info.get('loss_taxable', raw_loss)
+                old_div_tax = info.get('div_taxable', raw_div)
+                new_gain_tax = raw_gain * (1 - new_tfs)
+                new_loss_tax = raw_loss * (1 - new_tfs)
+                new_div_tax = raw_div * (1 - new_tfs)
+                etf_gain_taxable += (new_gain_tax - old_gain_tax)
+                etf_loss_taxable += (new_loss_tax - old_loss_tax)
+                etf_div_taxable += (new_div_tax - old_div_tax)
+                etf_net_taxable += (new_gain_tax - old_gain_tax) + (new_loss_tax - old_loss_tax) + (new_div_tax - old_div_tax)
+                info['tfs_rate'] = new_tfs
+                info['gain_taxable'] = new_gain_tax
+                info['loss_taxable'] = new_loss_tax
+                info['div_taxable'] = new_div_tax
+                cls_map = {0.30: 'aktienfonds', 0.15: 'mischfonds', 0.0: 'sonstiger_fonds'}
+                info['classification'] = cls_map.get(new_tfs, 'sonstiger_fonds')
+
+    inv_hero_color = "#4ade80" if etf_net_taxable >= 0 else "#f87171"
+    st.markdown(f"""
+<div class="hero-card-inv">
+    <div class="hero-label">KAP-INV · Steuerpflichtige Erträge (nach Teilfreistellung)</div>
+    <div class="hero-value" style="color:{inv_hero_color}">{fmt(etf_net_taxable)}</div>
+    <div class="hero-formula">G/V stpfl. ({fmt(etf_gain_taxable + etf_loss_taxable)}) + Div stpfl. ({fmt(etf_div_taxable)}) - QSt ({fmt(etf_wht)})</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="metric-grid">'
+        + metric_card("ETF-Gewinne (roh)", etf_gain_raw, "gain")
+        + metric_card("ETF-Verluste (roh)", etf_loss_raw, "loss")
+        + metric_card("Teilfreistellung", etf_gain_raw - etf_gain_taxable + etf_loss_raw - etf_loss_taxable, "info")
+        + metric_card("ETF-Netto (stpfl.)", etf_gain_taxable + etf_loss_taxable, "saldo")
+        + metric_card("ETF-Div. (stpfl.)", etf_div_taxable)
+        + metric_card("ETF-Quellensteuer", etf_wht)
+        + '</div>',
+        unsafe_allow_html=True
+    )
+
+    with st.expander("ETF-Details nach ISIN"):
+        etf_table = "| Ticker | Typ | TFS | G/V roh | G/V stpfl. | Div roh | Div stpfl. |\n"
+        etf_table += "|--------|-----|----:|--------:|----------:|--------:|----------:|\n"
+        for isin, info in sorted(etf_by_isin.items(), key=lambda x: x[1].get('ticker', '')):
+            cls_short = {'aktienfonds': 'Aktien', 'mischfonds': 'Misch', 'sonstiger_fonds': 'Sonst.'}.get(info.get('classification', ''), '?')
+            tfs_pct = f"{info.get('tfs_rate', 0) * 100:.0f}%"
+            gv_raw = info.get('gain', 0) + info.get('loss', 0)
+            gv_tax = info.get('gain_taxable', 0) + info.get('loss_taxable', 0)
+            div_raw = info.get('div', 0)
+            div_tax = info.get('div_taxable', 0)
+            etf_table += f"| {info.get('ticker', isin)} | {cls_short} | {tfs_pct} | {fmt_de(gv_raw)} | {fmt_de(gv_tax)} | {fmt_de(div_raw)} | {fmt_de(div_tax)} |\n"
+        st.markdown(etf_table)
+
+
 # ── Plausibilitätscheck (wenn CSV hochgeladen) ─────────────────────────────
 csv_cats = d.get('csv_category_totals', {})
 if csv_cats:
@@ -663,14 +844,20 @@ if csv_cats:
 
 section_title(f"Anlage KAP {steuerjahr} · Eintragungen")
 
-st.markdown(
+kap_rows_html = (
     kap_row("Z. 19", "Ausländische Kapitalerträge (Netto)", adj_zeile_19, highlight=True)
     + kap_row("Z. 20", "Davon: Aktiengewinne", zeile_20)
     + kap_row("Z. 22", "Verluste ohne Aktien", zeile_22, force_positive=True)
     + kap_row("Z. 23", "Aktienverluste", zeile_23, force_positive=True)
-    + kap_row("Z. 41", "Anrechenbare Quellensteuer", quellensteuer),
-    unsafe_allow_html=True
+    + kap_row("Z. 41", "Anrechenbare Quellensteuer", quellensteuer)
 )
+
+if has_etf_data and invstg_aktiv:
+    kap_rows_html += '<div class="section-title" style="margin-top:1.5rem;">Anlage KAP-INV</div>'
+    kap_rows_html += kap_row("KAP-INV", "Erträge nach Teilfreistellung", etf_net_taxable, highlight=True)
+    kap_rows_html += kap_row("KAP-INV", "Anrechenbare Quellensteuer (ETF)", etf_wht)
+
+st.markdown(kap_rows_html, unsafe_allow_html=True)
 
 # ── Zuflussprinzip Details ────────────────────────────────────────────────────
 
@@ -997,12 +1184,28 @@ if sh_count > 0:
     sh_export += f"  Prämien umgebucht:     {fmt_de(sh_eur):>14} EUR\n"
     sh_export += f"  (Von Topf 1 nach Topf 2 verschoben)\n"
 
+inv_export = ""
+if has_etf_data and invstg_aktiv:
+    inv_export = f"\nANLAGE KAP-INV: INVESTMENTFONDS (InvStG)\n"
+    inv_export += f"  ETF-Gewinne (roh):     {fmt_de(etf_gain_raw):>14} EUR\n"
+    inv_export += f"  ETF-Verluste (roh):    {fmt_de(etf_loss_raw):>14} EUR\n"
+    inv_export += f"  ETF-Gewinne (stpfl.):  {fmt_de(etf_gain_taxable):>14} EUR\n"
+    inv_export += f"  ETF-Verluste (stpfl.): {fmt_de(etf_loss_taxable):>14} EUR\n"
+    inv_export += f"  ETF-Dividenden (roh):  {fmt_de(etf_div_raw):>14} EUR\n"
+    inv_export += f"  ETF-Dividenden (stpfl.):{fmt_de(etf_div_taxable):>13} EUR\n"
+    inv_export += f"  ETF-Quellensteuer:     {fmt_de(etf_wht):>14} EUR\n"
+    inv_export += f"  ─────────────────────────────────────────────────\n"
+    inv_export += f"  KAP-INV Netto (stpfl.):{fmt_de(etf_net_taxable):>14} EUR\n"
+    for isin, info in sorted(etf_by_isin.items(), key=lambda x: x[1].get('ticker', '')):
+        gv_tax = info.get('gain_taxable', 0) + info.get('loss_taxable', 0)
+        inv_export += f"    {info.get('ticker', isin):8s} TFS {info.get('tfs_rate', 0)*100:.0f}%  G/V stpfl. {fmt_de(gv_tax):>10} EUR\n"
+
 report_text = f"""ANLAGE KAP {steuerjahr} - Steuerbericht
 Erstellt: {_dt.now().strftime('%d.%m.%Y %H:%M')}
 Basiswährung: {d.get('base_currency', 'USD')}
 
 ═══════════════════════════════════════════════════
-TOPF 1: AKTIEN
+TOPF 1: AKTIEN (ohne ETF-Fonds)
   Aktiengewinne:         {fmt_de(d.get('stocks_gain_eur', 0)):>14} EUR
   Aktienverluste:        {fmt_de(d.get('stocks_loss_eur', 0)):>14} EUR
   ─────────────────────────────────────────────────
@@ -1015,7 +1218,7 @@ TOPF 2: SONSTIGES (inkl. Termingeschäfte)
   Optionsverluste:       {fmt_de(d.get('options_loss_eur', 0)):>14} EUR
   ─────────────────────────────────────────────────
   Saldo Sonstiges:       {fmt_de(topf_2):>14} EUR
-{fx_export}{sh_export}
+{fx_export}{sh_export}{inv_export}
 ═══════════════════════════════════════════════════
 ANLAGE KAP EINTRAGUNGEN
   Zeile 19 (Netto):      {fmt_de(zeile_19):>14} EUR
@@ -1023,7 +1226,7 @@ ANLAGE KAP EINTRAGUNGEN
   Zeile 22 (Verluste o. Aktien): {fmt_de(zeile_22):>8} EUR
   Zeile 23 (Aktienverluste): {fmt_de(zeile_23):>11} EUR
   Zeile 41 (Quellensteuer): {fmt_de(quellensteuer):>11} EUR
-═══════════════════════════════════════════════════
+{"" if not (has_etf_data and invstg_aktiv) else chr(10) + "ANLAGE KAP-INV EINTRAGUNGEN" + chr(10) + f"  KAP-INV Erträge (nach TFS): {fmt_de(etf_net_taxable):>8} EUR" + chr(10) + f"  KAP-INV Quellensteuer: {fmt_de(etf_wht):>13} EUR" + chr(10)}═══════════════════════════════════════════════════
 """
 
 st.download_button(

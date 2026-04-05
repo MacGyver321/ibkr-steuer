@@ -434,12 +434,42 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     else:
         print(f"Base currency is {base_currency} — no USD→EUR rate map needed.")
 
+    # 2b. Build ETF lookup from financial_instruments.csv
+    from etf_classification import get_classification, get_etf_info, get_teilfreistellung, is_known_etf, ETF_CLASSIFICATION
+    etf_isins = set()  # all ISINs that IBKR marks as ETF (subCategory)
+    symbol_to_isin = {}  # for Stillhalter underlying lookup
+    fi_path = os.path.join(ib_tax_dir, 'financial_instruments.csv')
+    if os.path.exists(fi_path):
+        for fi in load_csv(fi_path):
+            sym = fi.get('symbol', '').strip()
+            isin = fi.get('isin', '').strip()
+            if sym and isin:
+                symbol_to_isin[sym] = isin
+            if fi.get('subCategory') == 'ETF' and fi.get('assetCategory') == 'STK' and isin:
+                etf_isins.add(isin)
+    # Also pick up ETFs from trades themselves
+    for t in trades:
+        if t.get('subCategory') == 'ETF' and t.get('assetCategory') == 'STK':
+            isin = t.get('isin', '').strip()
+            if isin:
+                etf_isins.add(isin)
+    if etf_isins:
+        print(f"ETF-Erkennung: {len(etf_isins)} ETF-ISINs gefunden (subCategory=ETF).")
+
     # 3. Capital Gains (Stocks & Options)
     stocks_gain = 0.0
     stocks_loss = 0.0
 
     options_gain = 0.0
     options_loss = 0.0
+
+    # InvStG ETF tracking (KAP-INV)
+    etf_invstg_gain = 0.0       # InvStG fund gains (before Teilfreistellung)
+    etf_invstg_loss = 0.0       # InvStG fund losses (before Teilfreistellung)
+    etf_dividends_eur = 0.0     # InvStG fund dividends
+    etf_wht_eur = 0.0           # InvStG fund withholding tax (sum, negative)
+    etf_by_isin = {}            # per-ISIN tracking for Teilfreistellung
+    debug_rows = []             # per-trade debug export
 
     for t in trades:
         # Use reportDate for tax year assignment (Settlement/Buchungsdatum)
@@ -468,18 +498,81 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             pnl_eur = pnl_usd * rate_eur
 
         category = t.get('assetCategory')
-        
+
         if category == 'STK':
-            if pnl_eur > 0:
-                stocks_gain += pnl_eur
+            isin = t.get('isin', '').strip()
+            sub = t.get('subCategory', '')
+            if sub == 'ETF' and isin:
+                cls = get_classification(isin)
+                if cls == 'no_invstg':
+                    # Crypto/Commodity ETPs: stay in Topf 1 like regular stocks
+                    if pnl_eur > 0:
+                        stocks_gain += pnl_eur
+                    else:
+                        stocks_loss += pnl_eur
+                else:
+                    # InvStG fund → KAP-INV (not Topf 1)
+                    if pnl_eur > 0:
+                        etf_invstg_gain += pnl_eur
+                    else:
+                        etf_invstg_loss += pnl_eur
+                    # Per-ISIN tracking
+                    if isin not in etf_by_isin:
+                        info = get_etf_info(isin)
+                        etf_by_isin[isin] = {'ticker': info['ticker'] if info else isin[:12], 'name': info['name'] if info else '', 'classification': cls or 'sonstiger_fonds', 'gain': 0.0, 'loss': 0.0, 'div': 0.0, 'wht': 0.0}
+                    if pnl_eur > 0:
+                        etf_by_isin[isin]['gain'] += pnl_eur
+                    else:
+                        etf_by_isin[isin]['loss'] += pnl_eur
             else:
-                stocks_loss += pnl_eur
+                # Regular stock
+                if pnl_eur > 0:
+                    stocks_gain += pnl_eur
+                else:
+                    stocks_loss += pnl_eur
         elif category in ['OPT', 'FUT', 'FOP', 'FSFOP', 'BILL', 'BOND']:
             # FSFOP = Flex Single-Stock Futures Options, BILL = Treasury Bills, BOND = Bonds
             if pnl_eur > 0:
                 options_gain += pnl_eur
             else:
                 options_loss += pnl_eur
+
+        # Collect debug row
+        sub = t.get('subCategory', '')
+        isin = t.get('isin', '').strip()
+        if category == 'STK' and sub == 'ETF' and isin:
+            cls = get_classification(isin)
+            topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf1'
+        elif category == 'STK':
+            topf = 'Topf1'
+        else:
+            topf = 'Topf2'
+        debug_rows.append({
+            'dateTime': t.get('dateTime', ''),
+            'reportDate': t.get('reportDate', ''),
+            'symbol': t.get('symbol', ''),
+            'isin': isin,
+            'assetCategory': category,
+            'subCategory': sub,
+            'buySell': t.get('buySell', ''),
+            'quantity': t.get('quantity', ''),
+            'transactionType': t.get('transactionType', ''),
+            'currency': t.get('currency', ''),
+            'fifoPnlRealized': pnl_raw,
+            'fxRateToBase': fx_to_base,
+            'pnl_eur': round(pnl_eur, 2),
+            'topf': topf,
+        })
+
+    # Write debug CSV
+    if debug_rows:
+        import csv as csv_mod
+        debug_path = os.path.join(ib_tax_dir, 'trades_debug_eur.csv')
+        with open(debug_path, 'w', newline='', encoding='utf-8') as f:
+            w = csv_mod.DictWriter(f, fieldnames=debug_rows[0].keys())
+            w.writeheader()
+            w.writerows(debug_rows)
+        print(f"Debug: {len(debug_rows)} Trades mit EUR-Umrechnung → {debug_path}")
 
     # --- Stillhalterprämien: separate assigned option premiums from stock PnL ---
     # When a short option is assigned, IBKR bundles the premium into the stock's
@@ -595,12 +688,36 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             'is_cross_year': (orig_sell_date.year < tax_year) if orig_sell_date else False,
         })
 
-    # Move premiums from Topf 1 (stocks) to Topf 2 (sonstiges)
+    # Move premiums from Topf 1 (stocks) / KAP-INV to Topf 2 (sonstiges)
+    etf_stillhalter_premium_eur = 0.0
     if stillhalter_premium_eur > 0:
-        stocks_gain -= stillhalter_premium_eur
-        options_gain += stillhalter_premium_eur
+        # Split: check if underlying is an InvStG ETF
+        stk_premium = 0.0
+        etf_premium = 0.0
+        for det in stillhalter_details:
+            underlying = det['symbol'].split()[0] if det['symbol'] else ''
+            underlying_isin = symbol_to_isin.get(underlying, '')
+            if underlying_isin and underlying_isin in etf_isins:
+                cls = get_classification(underlying_isin)
+                if cls and cls != 'no_invstg':
+                    etf_premium += det['premium_eur']
+                    # Also adjust per-ISIN tracking
+                    if underlying_isin in etf_by_isin:
+                        etf_by_isin[underlying_isin]['gain'] -= det['premium_eur']
+                    continue
+            stk_premium += det['premium_eur']
+
+        stocks_gain -= stk_premium
+        etf_invstg_gain -= etf_premium
+        etf_stillhalter_premium_eur = etf_premium
+        options_gain += stillhalter_premium_eur  # total premium always to Topf 2
         price_source = "tradePrice" if has_trade_price else "closePrice (Näherung)"
-        print(f"Stillhalterprämien: {stillhalter_count} Assignments, {stillhalter_premium_eur:,.2f} EUR von Topf 1 → Topf 2 verschoben (Quelle: {price_source}).")
+        parts = []
+        if stk_premium > 0:
+            parts.append(f"{stk_premium:,.2f} von Aktien")
+        if etf_premium > 0:
+            parts.append(f"{etf_premium:,.2f} von ETF/KAP-INV")
+        print(f"Stillhalterprämien: {stillhalter_count} Assignments, {stillhalter_premium_eur:,.2f} EUR → Topf 2 ({', '.join(parts)}) (Quelle: {price_source}).")
     if stillhalter_unmatched:
         print(f"  (!) WARNUNG: {len(stillhalter_unmatched)} Assignment(s) — der ursprüngliche Optionsverkauf "
               f"(ExchTrade SELL) wurde nicht gefunden. Vermutlich in einem Vorjahr eröffnet. "
@@ -736,10 +853,25 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     put_assignment_lots[sym].popleft()
 
         if cross_year_put_total > 0:
-            stocks_gain -= cross_year_put_total
+            # Split correction between regular stocks and InvStG ETFs
+            stk_corr = 0.0
+            etf_corr = 0.0
+            for c in cross_year_put_corrections:
+                sym = c['symbol']
+                underlying_isin = symbol_to_isin.get(sym, '')
+                if underlying_isin and underlying_isin in etf_isins:
+                    cls = get_classification(underlying_isin)
+                    if cls and cls != 'no_invstg':
+                        etf_corr += c['correction_eur']
+                        if underlying_isin in etf_by_isin:
+                            etf_by_isin[underlying_isin]['gain'] -= c['correction_eur']
+                        continue
+                stk_corr += c['correction_eur']
+            stocks_gain -= stk_corr
+            etf_invstg_gain -= etf_corr
             # NOT options_gain += ... (premium was already taxed in the assignment year)
             print(f"Cross-Year Put-Korrektur: {len(cross_year_put_corrections)} Positionen, "
-                  f"{cross_year_put_total:,.2f} EUR von Aktien-PnL abgezogen (Prämie bereits in Vorjahr versteuert).")
+                  f"{cross_year_put_total:,.2f} EUR von PnL abgezogen (Prämie bereits in Vorjahr versteuert).")
 
     # Zuflussprinzip: cross-year premium aggregation
     cross_year_premium_eur = sum(d['premium_eur'] for d in stillhalter_details if d['is_cross_year'])
@@ -802,13 +934,35 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 amount_usd = amount_raw * fx
                 amount_eur = amount_usd * rate_eur
         
+        # Check if this is an InvStG ETF dividend/WHT
+        is_etf_fund = False
+        fund_isin = ''
+        if f.get('subCategory') == 'ETF':
+            fund_isin = f.get('isin', '').strip()
+            if fund_isin:
+                cls = get_classification(fund_isin)
+                if cls and cls != 'no_invstg':
+                    is_etf_fund = True
+
         if code == 'DIV':
-            dividends_eur += amount_eur
+            if is_etf_fund:
+                etf_dividends_eur += amount_eur
+                if fund_isin not in etf_by_isin:
+                    info = get_etf_info(fund_isin)
+                    etf_by_isin[fund_isin] = {'ticker': info['ticker'] if info else fund_isin[:12], 'name': info['name'] if info else '', 'classification': cls or 'sonstiger_fonds', 'gain': 0.0, 'loss': 0.0, 'div': 0.0, 'wht': 0.0}
+                etf_by_isin[fund_isin]['div'] += amount_eur
+            else:
+                dividends_eur += amount_eur
         elif code == 'PIL':
             # Payment in Lieu: positive = received (long position lent out)
             # negative = paid (short position owes dividend)
             # Net with dividends as per German tax law
-            dividends_eur += amount_eur
+            if is_etf_fund:
+                etf_dividends_eur += amount_eur
+                if fund_isin in etf_by_isin:
+                    etf_by_isin[fund_isin]['div'] += amount_eur
+            else:
+                dividends_eur += amount_eur
         elif code in ['INTR', 'CINT', 'INTP', 'DINT']:
             # Interest income (bond coupons, credit interest)
             # INTP = Accrued interest paid (deductible Stückzinsen)
@@ -818,7 +972,12 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             # Tax is usually negative. We want the absolute value of the NET tax paid.
             # If there are adjustments/refunds (positive), they reduce the total tax.
             # We track the sum directly and take the absolute value later.
-            withholding_tax_eur += amount_eur
+            if is_etf_fund:
+                etf_wht_eur += amount_eur
+                if fund_isin in etf_by_isin:
+                    etf_by_isin[fund_isin]['wht'] += amount_eur
+            else:
+                withholding_tax_eur += amount_eur
             
     # Finalize tax: convert net sum to absolute value for "Tax Paid" field
     withholding_tax_eur = abs(withholding_tax_eur)
@@ -897,8 +1056,23 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 loss_eur = summary_loss_usd * default_fallback_rate
                 
                 if asset == 'STK':
-                    stocks_gain += gain_eur
-                    stocks_loss += loss_eur
+                    sub_cat = s_row.get('subCategory', '')
+                    if sub_cat == 'ETF':
+                        cls = get_classification(isin)
+                        if cls and cls != 'no_invstg':
+                            etf_invstg_gain += gain_eur
+                            etf_invstg_loss += loss_eur
+                            if isin not in etf_by_isin:
+                                info = get_etf_info(isin)
+                                etf_by_isin[isin] = {'ticker': info['ticker'] if info else isin[:12], 'name': info['name'] if info else '', 'classification': cls or 'sonstiger_fonds', 'gain': 0.0, 'loss': 0.0, 'div': 0.0, 'wht': 0.0}
+                            etf_by_isin[isin]['gain'] += gain_eur
+                            etf_by_isin[isin]['loss'] += loss_eur
+                        else:
+                            stocks_gain += gain_eur
+                            stocks_loss += loss_eur
+                    else:
+                        stocks_gain += gain_eur
+                        stocks_loss += loss_eur
                 elif asset in ['OPT', 'FUT', 'FOP', 'FSFOP']:
                     options_gain += gain_eur
                     options_loss += loss_eur
@@ -993,6 +1167,126 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         if tgl_rows:
             fx_translation = float(tgl_rows[0].get('fxTranslationGainLoss', 0) or 0)
 
+    # --- Teilfreistellung (InvStG §20) ---
+    # Apply partial exemption per ETF based on classification
+    etf_gain_taxable = 0.0
+    etf_loss_taxable = 0.0
+    etf_div_taxable = 0.0
+    etf_unknown_isins = []  # ISINs with subCategory=ETF but not in lookup table
+    for isin in etf_isins:
+        if not is_known_etf(isin) and isin in etf_by_isin:
+            etf_unknown_isins.append(isin)
+
+    for isin, data in etf_by_isin.items():
+        tfs_rate = get_teilfreistellung(isin)
+        data['tfs_rate'] = tfs_rate
+        data['gain_taxable'] = data['gain'] * (1 - tfs_rate)
+        data['loss_taxable'] = data['loss'] * (1 - tfs_rate)
+        data['div_taxable'] = data['div'] * (1 - tfs_rate)
+        etf_gain_taxable += data['gain_taxable']
+        etf_loss_taxable += data['loss_taxable']
+        etf_div_taxable += data['div_taxable']
+
+    etf_wht_abs = abs(etf_wht_eur)  # positive for reporting
+    etf_net_taxable = etf_gain_taxable + etf_loss_taxable + etf_div_taxable
+
+    if etf_by_isin:
+        tfs_reduction = (etf_invstg_gain + etf_invstg_loss + etf_dividends_eur) - etf_net_taxable
+        print(f"InvStG ETFs: {len(etf_by_isin)} Fonds erkannt. "
+              f"Gewinne {etf_invstg_gain:,.2f}, Verluste {etf_invstg_loss:,.2f}, "
+              f"Dividenden {etf_dividends_eur:,.2f}, WHT {etf_wht_abs:,.2f} EUR. "
+              f"Teilfreistellung: {tfs_reduction:,.2f} EUR Reduktion.")
+    if etf_unknown_isins:
+        print(f"  (!) {len(etf_unknown_isins)} ETF(s) nicht in Klassifizierungstabelle — als sonstiger Fonds (0% TFS) behandelt.")
+
+    # --- Per-Lot FX Correction (CLOSED_LOT Tageskurs-Methode) ---
+    # Compares IBKR method (net PnL × close rate) vs. correct method
+    # (proceeds × close rate - cost × open rate) per FIFO lot.
+    # Delta per lot = |cost_trade_ccy| × (fxRate_close - fxRate_open)
+    fx_correction_total = 0.0
+    fx_correction_details = []
+    fx_corr_by_topf = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
+    closed_lots_path = os.path.join(ib_tax_dir, 'closed_lots.csv')
+    if os.path.exists(closed_lots_path) and base_currency == 'EUR':
+        from collections import defaultdict
+        import bisect
+
+        closed_lots = load_csv(closed_lots_path)
+
+        # Build daily FX rate map from all trades (same as calculate_fx_gains)
+        daily_fx = defaultdict(list)
+        for t in trades:
+            curr = t.get('currency', '')
+            fx = safe_float(t.get('fxRateToBase'), 0)
+            dt = (t.get('dateTime') or '')[:10]
+            if curr == 'USD' and fx > 0 and dt:
+                daily_fx[dt].append(fx)
+        fx_map = {d: sum(r) / len(r) for d, r in daily_fx.items()}
+        fx_dates = sorted(fx_map.keys())
+
+        def lookup_fx(date_str):
+            day = date_str[:10] if date_str else ''
+            if day in fx_map:
+                return fx_map[day]
+            if not fx_dates:
+                return 0
+            idx = bisect.bisect_left(fx_dates, day)
+            if idx == 0:
+                return fx_map[fx_dates[0]]
+            if idx >= len(fx_dates):
+                return fx_map[fx_dates[-1]]
+            return fx_map[fx_dates[idx - 1]]
+
+        fx_corr_by_topf = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
+        lots_processed = 0
+
+        for lot in closed_lots:
+            if lot.get('currency') != 'USD':
+                continue
+            report_date = parse_date(lot.get('reportDate') or lot.get('dateTime'))
+            if not report_date or report_date.year != tax_year:
+                continue
+
+            # Skip FUT — notional-based cost creates phantom FX gains
+            # (futures settle via margin, not full notional exchange)
+            category = lot.get('assetCategory', '')
+            if category == 'FUT':
+                continue
+
+            cost_raw = abs(safe_float(lot.get('cost'), 0))
+            if cost_raw < 0.01:
+                continue
+
+            fx_close = safe_float(lot.get('fxRateToBase'), 0)
+            open_dt = lot.get('openDateTime', '')
+            fx_open = lookup_fx(open_dt)
+
+            if fx_close <= 0 or fx_open <= 0:
+                continue
+
+            delta = cost_raw * (fx_close - fx_open)
+            fx_correction_total += delta
+            lots_processed += 1
+
+            # Determine topf
+            sub = lot.get('subCategory', '')
+            isin = lot.get('isin', '').strip()
+            if category == 'STK' and sub == 'ETF' and isin:
+                cls = get_classification(isin)
+                topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf1'
+            elif category == 'STK':
+                topf = 'Topf1'
+            else:
+                topf = 'Topf2'
+            fx_corr_by_topf[topf] += delta
+
+        if lots_processed > 0:
+            print(f"\nTageskurs-Korrektur (CLOSED_LOT): {lots_processed} Lots analysiert.")
+            print(f"  FX-Korrektur gesamt: {fx_correction_total:>+12,.2f} EUR")
+            for topf, val in sorted(fx_corr_by_topf.items()):
+                if abs(val) > 0.01:
+                    print(f"    {topf}: {val:>+12,.2f} EUR")
+
     # Correct Anlage KAP Structure (2025):
     # Two separate "pots" (Töpfe) for loss offsetting:
     #
@@ -1054,6 +1348,23 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         "xml_has_fx_data": xml_has_fx_data,
         "csv_category_totals": csv_category_totals,
         "csv_income_totals": csv_income_totals,
+        # Per-lot FX correction (Tageskurs-Methode)
+        "fx_correction_total": fx_correction_total,
+        "fx_correction_by_topf": fx_corr_by_topf,
+        # InvStG / Anlage KAP-INV
+        "kap_inv": {
+            "etf_gain_raw_eur": etf_invstg_gain,
+            "etf_loss_raw_eur": etf_invstg_loss,
+            "etf_gain_taxable_eur": etf_gain_taxable,
+            "etf_loss_taxable_eur": etf_loss_taxable,
+            "etf_dividends_raw_eur": etf_dividends_eur,
+            "etf_dividends_taxable_eur": etf_div_taxable,
+            "etf_wht_eur": etf_wht_abs,
+            "etf_net_taxable_eur": etf_net_taxable,
+            "etf_by_isin": etf_by_isin,
+            "etf_unknown_isins": etf_unknown_isins,
+            "etf_stillhalter_premium_eur": etf_stillhalter_premium_eur if 'etf_stillhalter_premium_eur' in dir() else 0.0,
+        },
         # Plausibility Metadata
         "has_trade_price": has_trade_price,
         "audit": {
@@ -1117,19 +1428,47 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             print(f"    Multi-Year-Daten: FIFO-Lots vollständig ab Kontoeröffnung.")
         print(f"    (in Topf 2 enthalten)")
 
+    if etf_by_isin:
+        print("-" * 60)
+        print("ANLAGE KAP-INV (InvStG Investmentfonds)")
+        for isin, data in sorted(etf_by_isin.items(), key=lambda x: abs(x[1]['gain'] + x[1]['loss']), reverse=True):
+            tfs_pct = int(data.get('tfs_rate', 0) * 100)
+            net_raw = data['gain'] + data['loss']
+            print(f"    {data['ticker']:6s} ({data['classification'][:12]:12s} {tfs_pct:2d}% TFS)  G/V: {net_raw:>10,.2f}  Div: {data['div']:>8,.2f}  WHT: {data['wht']:>8,.2f}")
+        print(f"    ─────────────────────────────────────")
+        print(f"    ETF-Gewinne (roh):     {etf_invstg_gain:>12,.2f} EUR")
+        print(f"    ETF-Verluste (roh):    {etf_invstg_loss:>12,.2f} EUR")
+        print(f"    ETF-Dividenden (roh):  {etf_dividends_eur:>12,.2f} EUR")
+        tfs_reduction = (etf_invstg_gain + etf_invstg_loss + etf_dividends_eur) - etf_net_taxable
+        if abs(tfs_reduction) > 0.01:
+            print(f"    Teilfreistellung:      {-tfs_reduction:>12,.2f} EUR")
+        print(f"    ETF-Netto (stpfl.):    {etf_net_taxable:>12,.2f} EUR")
+        print(f"    ETF-Quellensteuer:     {etf_wht_abs:>12,.2f} EUR")
+
     print("-" * 60)
     print("ZEILE 19 (Ausländische Kapitalerträge - NETTO):")
     print(f"    = Saldo Aktien + Saldo Sonstiges")
     print(f"    = {topf_1_aktien:,.2f} + {topf_2_sonstiges:,.2f}")
     print(f"    ═════════════════════════════════════")
     print(f"    ZEILE 19:              {zeile_19_netto:>12,.2f} EUR")
+    if etf_by_isin:
+        print(f"    KAP-INV (ETF netto):   {etf_net_taxable:>12,.2f} EUR")
     
     print("-" * 60)
     print(f"ZEILE 20 (Davon: Aktiengewinne):   {zeile_20_stock_gains:>12,.2f} EUR")
     print(f"ZEILE 22 (Verluste ohne Aktien):   {zeile_22_other_losses:>12,.2f} EUR")
     print(f"ZEILE 23 (Aktienverluste):         {zeile_23_stock_losses:>12,.2f} EUR")
     print(f"ZEILE 41 (Quellensteuer):          {withholding_tax_eur:>12,.2f} EUR")
-    
+
+    if abs(fx_correction_total) > 0.01:
+        corrected_z19 = zeile_19_netto + fx_correction_total
+        print("-" * 60)
+        print("TAGESKURS-VERGLEICH (Erlös/AK je zum eigenen Tageskurs)")
+        print(f"    IBKR-Methode (Netto × Schlusskurs):  {zeile_19_netto:>12,.2f} EUR")
+        print(f"    FX-Korrektur (CLOSED_LOT Analyse):   {fx_correction_total:>+12,.2f} EUR")
+        print(f"    Tageskurs-Methode Zeile 19:          {corrected_z19:>12,.2f} EUR")
+        print(f"    Differenz:                           {fx_correction_total:>+12,.2f} EUR ({fx_correction_total/max(abs(zeile_19_netto),1)*100:+.2f}%)")
+
     print("\n" + "="*60)
     print("PLAUSIBILITÄTSPRÜFUNG (AUDIT)")
     print("="*60)

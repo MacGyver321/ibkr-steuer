@@ -194,6 +194,8 @@ def parse_ibkr_xml(xml_file_path, output_dir):
         'FIFOPerformanceSummaryInBase': 'pnl_summary.csv'
     }
     
+    closed_lot_rows = []  # CLOSED_LOT data for per-lot FX correction
+
     for section_tag, filename in sections.items():
         section_node = root.find(f'.//{section_tag}')
         
@@ -218,11 +220,14 @@ def parse_ibkr_xml(xml_file_path, output_dir):
             attrib = row.attrib
 
             # For Trades: only keep EXECUTION-level rows (real trades).
-            # Extended Flex Queries may include ORDER, CLOSED_LOT, SYMBOL_SUMMARY,
-            # ASSET_SUMMARY rows that have empty numeric fields and cause errors.
+            # CLOSED_LOT rows are saved separately for per-lot FX correction.
             if section_tag == 'Trades':
                 lod = attrib.get('levelOfDetail', '')
-                if lod and lod != 'EXECUTION':
+                if lod == 'CLOSED_LOT':
+                    closed_lot_rows.append(attrib.copy())
+                    skipped += 1
+                    continue
+                elif lod and lod != 'EXECUTION':
                     skipped += 1
                     continue
 
@@ -270,6 +275,19 @@ def parse_ibkr_xml(xml_file_path, output_dir):
             writer.writeheader()
             writer.writerows(fx_rows)
         print(f"Saved {len(fx_rows)} FX transactions to {fx_path}")
+
+    # Save CLOSED_LOT data for per-lot FX correction
+    if closed_lot_rows:
+        cl_path = os.path.join(output_dir, 'closed_lots.csv')
+        cl_fields = set()
+        for r in closed_lot_rows:
+            cl_fields.update(r.keys())
+        sorted_cl = sorted(cl_fields)
+        with open(cl_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=sorted_cl)
+            writer.writeheader()
+            writer.writerows(closed_lot_rows)
+        print(f"Saved {len(closed_lot_rows)} CLOSED_LOT rows to {cl_path}")
 
     # Extract MTM Performance Summary for CASH (FX positions) — plausibility reference
     mtm_section = root.find('.//MTMPerformanceSummaryInBase')
