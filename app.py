@@ -525,7 +525,7 @@ st.markdown("""
     <strong>Übersicht: realisierter G&amp;V</strong> &rarr; Zeitraum wählen &rarr; Format: CSV &rarr; Erstellen
     </span><br>
     <span style="color: #94a3b8; font-size: 0.78rem;">
-    <strong>Hinweis:</strong> Bei mehreren Konten wird der CSV-Bericht bisher nur für das erste Konto verwendet.
+    <strong>Hinweis:</strong> Der CSV-Plausibilitätscheck funktioniert aktuell nur bei einem einzelnen Konto. Bei mehreren Konten wird der CSV-Bericht ignoriert.
     </span>
 </div>
 """, unsafe_allow_html=True)
