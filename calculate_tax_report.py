@@ -1313,9 +1313,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if category == 'FUT':
                 continue
 
-            cost_raw = abs(safe_float(lot.get('cost'), 0))
-            if cost_raw < 0.01:
-                continue
+            cost_raw = safe_float(lot.get('cost'), 0)
 
             if base_currency == 'EUR':
                 # fxRateToBase on lot = USD→EUR rate at close
