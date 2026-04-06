@@ -84,11 +84,11 @@ st.markdown("""
 
     /* ── Section headers ── */
     .section-title {
-        font-size: 0.7rem;
+        font-size: 0.85rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 2px;
-        color: #475569;
+        color: #cbd5e1;
         margin: 2rem 0 0.75rem 0;
         padding-bottom: 0.5rem;
         border-bottom: 1px solid rgba(255,255,255,0.06);
