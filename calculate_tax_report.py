@@ -1,8 +1,10 @@
 
 import csv
+import io
 import os
 import sys
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 def load_csv(filepath):
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -72,6 +74,20 @@ def get_exchange_rates(trades, funds):
                 pass
 
     return rates
+
+def fetch_ecb_rates(tax_year):
+    """Statische EZB-Referenzkurse USD→EUR für das Steuerjahr laden.
+
+    Verwendet eingebettete Kursdaten aus ecb_rates.py (offline, kein Internet nötig).
+    Verfügbar: 2024, 2025. Für andere Jahre: leeres dict.
+    Returns dict {date -> eur_per_usd}.
+    """
+    try:
+        from ecb_rates import get_ecb_rates
+        return get_ecb_rates(tax_year)
+    except ImportError:
+        print(f"  EZB-Kursmodul (ecb_rates.py) nicht gefunden.")
+        return {}
 
 def get_rate_for_date(target_date, rates_map):
     if not rates_map:
@@ -428,9 +444,27 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     
     # 2. Build Exchange Rates (USD -> EUR) — only needed for USD-based accounts
     usd_to_eur_rates = {}
+    ecb_rates_used = False
     if base_currency == 'USD':
         usd_to_eur_rates = get_exchange_rates(trades, funds)
-        print(f"Loaded {len(usd_to_eur_rates)} daily exchange rates.")
+        ibkr_rate_count = len(usd_to_eur_rates)
+        print(f"IBKR-Wechselkurse: {ibkr_rate_count} Tageskurse aus Transaktionsdaten.")
+
+        # EZB-Referenzkurse als Ergänzung/Fallback laden (statisch eingebettet, kein Internet nötig)
+        ecb_rates = fetch_ecb_rates(tax_year)
+        if ecb_rates:
+            # EZB-Kurse nur für Tage einfügen, an denen kein IBKR-Kurs vorliegt
+            ecb_filled = 0
+            for d, rate in ecb_rates.items():
+                if d not in usd_to_eur_rates:
+                    usd_to_eur_rates[d] = rate
+                    ecb_filled += 1
+            ecb_rates_used = ecb_filled > 0
+            print(f"EZB-Referenzkurse:  {len(ecb_rates)} Tageskurse (statisch/offline), {ecb_filled} Lücken gefüllt.")
+        else:
+            print(f"EZB-Referenzkurse:  nicht verfügbar für Steuerjahr {tax_year} (nur 2024/2025 eingebettet).")
+
+        print(f"Wechselkurse gesamt: {len(usd_to_eur_rates)} Tageskurse.")
     else:
         print(f"Base currency is {base_currency} — no USD→EUR rate map needed.")
 
@@ -505,11 +539,11 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if sub == 'ETF' and isin:
                 cls = get_classification(isin)
                 if cls == 'no_invstg':
-                    # Crypto/Commodity ETPs: stay in Topf 1 like regular stocks
+                    # Crypto/Commodity ETPs: NOT a stock → Topf 2 (§20 Abs. 2 S. 1 Nr. 7 EStG)
                     if pnl_eur > 0:
-                        stocks_gain += pnl_eur
+                        options_gain += pnl_eur
                     else:
-                        stocks_loss += pnl_eur
+                        options_loss += pnl_eur
                 else:
                     # InvStG fund → KAP-INV (not Topf 1)
                     if pnl_eur > 0:
@@ -542,7 +576,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         isin = t.get('isin', '').strip()
         if category == 'STK' and sub == 'ETF' and isin:
             cls = get_classification(isin)
-            topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf1'
+            topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf2'
         elif category == 'STK':
             topf = 'Topf1'
         else:
@@ -1072,8 +1106,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                             etf_by_isin[isin]['gain'] += gain_eur
                             etf_by_isin[isin]['loss'] += loss_eur
                         else:
-                            stocks_gain += gain_eur
-                            stocks_loss += loss_eur
+                            # no_invstg ETPs (Crypto, Commodities) → Topf 2
+                            options_gain += gain_eur
+                            options_loss += loss_eur
                     else:
                         stocks_gain += gain_eur
                         stocks_loss += loss_eur
@@ -1102,7 +1137,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
 
     # Option A: Exact FX from XML FxTransactions (IBKR's own FIFO, per-transaction realizedPL)
     fx_pnl_path = os.path.join(ib_tax_dir, 'fx_realized_pnl.csv')
-    if not fx_results and os.path.exists(fx_pnl_path) and base_currency == 'EUR':
+    if not fx_results and os.path.exists(fx_pnl_path):
         fx_pnl_rows = load_csv(fx_pnl_path)
         fx_by_curr = {}
         for row in fx_pnl_rows:
@@ -1110,9 +1145,15 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if not rd or rd.year != tax_year:
                 continue
             curr = row.get('fxCurrency', '')
-            pnl = safe_float(row.get('realizedPL'), 0)
-            if not curr or abs(pnl) < 0.001:
+            pnl_raw = safe_float(row.get('realizedPL'), 0)
+            if not curr or abs(pnl_raw) < 0.001:
                 continue
+            # EUR base: realizedPL already in EUR; USD base: realizedPL in USD → convert
+            if base_currency == 'EUR':
+                pnl = pnl_raw
+            else:
+                rate_eur = get_rate_for_date(rd, usd_to_eur_rates)
+                pnl = pnl_raw * rate_eur
             if curr not in fx_by_curr:
                 fx_by_curr[curr] = {'gain': 0, 'loss': 0, 'net': 0, 'lots_remaining': 0, 'disposals_count': 0}
             if pnl > 0:
@@ -1126,7 +1167,12 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             fx_total_gain = sum(d['gain'] for d in fx_by_curr.values())
             fx_total_loss = sum(d['loss'] for d in fx_by_curr.values())
             fx_source = 'xml'
+            # USD base: IBKR tracks EUR as foreign currency, but from German tax perspective
+            # it's the USD that's foreign. Label accordingly.
+            fx_label = 'USD' if base_currency == 'USD' else '/'.join(fx_by_curr.keys())
             print(f"FX: Exakte Werte aus XML FxTransactions übernommen ({len(fx_pnl_rows)} Einträge).")
+            if base_currency == 'USD':
+                print(f"  USD-Konto: FX-Gewinne/-Verluste aus EUR-Transaktionen (IBKR trackt EUR als Fremdwährung).")
 
     # Option B: Exact FX from IBKR CSV report (same data as XML FxTransactions)
     if not fx_results and fx_csv_path and os.path.exists(fx_csv_path) and base_currency == 'EUR':
@@ -1211,21 +1257,25 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     fx_correction_details = []
     fx_corr_by_topf = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
     closed_lots_path = os.path.join(ib_tax_dir, 'closed_lots.csv')
-    if os.path.exists(closed_lots_path) and base_currency == 'EUR':
-        from collections import defaultdict
+    if os.path.exists(closed_lots_path):
         import bisect
 
         closed_lots = load_csv(closed_lots_path)
 
-        # Build daily FX rate map from all trades (same as calculate_fx_gains)
-        daily_fx = defaultdict(list)
-        for t in trades:
-            curr = t.get('currency', '')
-            fx = safe_float(t.get('fxRateToBase'), 0)
-            dt = (t.get('dateTime') or '')[:10]
-            if curr == 'USD' and fx > 0 and dt:
-                daily_fx[dt].append(fx)
-        fx_map = {d: sum(r) / len(r) for d, r in daily_fx.items()}
+        if base_currency == 'EUR':
+            # EUR base: fxRateToBase on USD trades IS the USD→EUR rate directly
+            daily_fx = defaultdict(list)
+            for t in trades:
+                curr = t.get('currency', '')
+                fx = safe_float(t.get('fxRateToBase'), 0)
+                dt = (t.get('dateTime') or '')[:10]
+                if curr == 'USD' and fx > 0 and dt:
+                    daily_fx[dt].append(fx)
+            fx_map = {d: sum(r) / len(r) for d, r in daily_fx.items()}
+        else:
+            # USD base: fxRateToBase=1 for USD trades (useless), use usd_to_eur_rates map
+            fx_map = {d.strftime('%Y-%m-%d'): r for d, r in usd_to_eur_rates.items()}
+
         fx_dates = sorted(fx_map.keys())
 
         def lookup_fx(date_str):
@@ -1259,7 +1309,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if cost_raw < 0.01:
                 continue
 
-            fx_close = safe_float(lot.get('fxRateToBase'), 0)
+            if base_currency == 'EUR':
+                # fxRateToBase on lot = USD→EUR rate at close
+                fx_close = safe_float(lot.get('fxRateToBase'), 0)
+            else:
+                # USD base: look up USD→EUR rate at close date from our rate map
+                close_dt = (lot.get('reportDate') or lot.get('dateTime') or '')[:10]
+                fx_close = lookup_fx(close_dt)
+
             open_dt = lot.get('openDateTime', '')
             fx_open = lookup_fx(open_dt)
 
@@ -1275,7 +1332,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             isin = lot.get('isin', '').strip()
             if category == 'STK' and sub == 'ETF' and isin:
                 cls = get_classification(isin)
-                topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf1'
+                topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf2'
             elif category == 'STK':
                 topf = 'Topf1'
             else:
@@ -1376,6 +1433,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             "raw_tax_base": raw_tax_base,
             "added_from_summary": added_from_summary,
             "usd_to_eur_rates_count": len(usd_to_eur_rates),
+            "ecb_rates_used": ecb_rates_used,
             "stillhalter_count": stillhalter_count,
             "stillhalter_premium_eur": stillhalter_premium_eur,
             "stillhalter_unmatched": stillhalter_unmatched,
@@ -1478,7 +1536,11 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     print(f"Übersprungene Jahre (nicht {tax_year}):  {funds_skipped_year}")
     print(f"Instrumente aus PnL Summary:       {added_from_summary}")
     print(f"Gefundene Wechselkurse:            {len(usd_to_eur_rates)}")
-    
+    if ecb_rates_used:
+        print(f"Kursquelle:                        IBKR + EZB-Referenzkurse")
+    elif usd_to_eur_rates:
+        print(f"Kursquelle:                        IBKR-Transaktionsdaten")
+
     # Check if exchange rates are in plausible range (roughly 0.9 - 1.0 for 2025)
     if usd_to_eur_rates:
         avg_rate = sum(usd_to_eur_rates.values()) / len(usd_to_eur_rates)

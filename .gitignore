@@ -6,6 +6,7 @@ __pycache__/
 # Sensitive IBKR data (real accounts)
 *.xml
 !demo_portfolio_2025.xml
+!demo/demo_usd_2025.xml
 
 # Extracted CSVs (contain real financial data)
 *.csv
