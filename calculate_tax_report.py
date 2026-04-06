@@ -1268,6 +1268,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     fx_correction_total = 0.0
     fx_correction_details = []
     fx_corr_by_topf = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
+    # Per-Topf gain/loss adjustments for consistent Zeilen 20/22/23
+    fx_corr_gain_adj = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
+    fx_corr_loss_adj = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
     closed_lots_path = os.path.join(ib_tax_dir, 'closed_lots.csv')
     if os.path.exists(closed_lots_path):
         import bisect
@@ -1349,6 +1352,22 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 topf = 'Topf2'
             fx_corr_by_topf[topf] += delta
 
+            # Track gain/loss shift per lot for consistent Zeilen 20/22/23
+            pnl_raw = safe_float(lot.get('fifoPnlRealized'), 0)
+            if base_currency == 'EUR':
+                original_pnl = pnl_raw * fx_close
+            else:
+                original_pnl = pnl_raw * get_rate_for_date(report_date, usd_to_eur_rates)
+            corrected_pnl = original_pnl + delta
+
+            # How did gains/losses shift?
+            orig_gain = max(original_pnl, 0)
+            orig_loss = min(original_pnl, 0)
+            corr_gain = max(corrected_pnl, 0)
+            corr_loss = min(corrected_pnl, 0)
+            fx_corr_gain_adj[topf] += corr_gain - orig_gain
+            fx_corr_loss_adj[topf] += corr_loss - orig_loss
+
         if lots_processed > 0:
             print(f"\nTageskurs-Korrektur (CLOSED_LOT): {lots_processed} Lots analysiert.")
             print(f"  FX-Korrektur gesamt: {fx_correction_total:>+12,.2f} EUR")
@@ -1421,6 +1440,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         # Per-lot FX correction (Tageskurs-Methode)
         "fx_correction_total": fx_correction_total,
         "fx_correction_by_topf": fx_corr_by_topf,
+        "fx_corr_gain_adj": fx_corr_gain_adj,
+        "fx_corr_loss_adj": fx_corr_loss_adj,
         # InvStG / Anlage KAP-INV
         "kap_inv": {
             "etf_gain_raw_eur": etf_invstg_gain,

@@ -541,10 +541,15 @@ if abs(fx_corr_total) > 0.01:
         if invstg_aktiv:
             adj_zeile_19 += corr_topf1 + corr_topf2
             zeile_19 += corr_topf1 + corr_topf2
-            # KAP-INV correction applied later when etf_net_taxable is defined
         else:
             adj_zeile_19 += fx_corr_total
             zeile_19 += fx_corr_total
+        # Zeilen 20/22/23 per-Lot gain/loss adjustments (exakt, nicht Netto-Approximation)
+        gain_adj = d.get('fx_corr_gain_adj', {})
+        loss_adj = d.get('fx_corr_loss_adj', {})
+        zeile_20 += gain_adj.get('Topf1', 0)                    # Aktiengewinne Δ
+        zeile_23 -= loss_adj.get('Topf1', 0)                    # Aktienverluste Δ (loss_adj neg=mehr, pos=weniger)
+        zeile_22 -= loss_adj.get('Topf2', 0)                    # Verluste ohne Aktien Δ
     else:
         tageskurs_kapinv_corr = 0
 

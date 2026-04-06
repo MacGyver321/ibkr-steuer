@@ -540,6 +540,12 @@ if abs(fx_corr_total) > 0.01:
         else:
             adj_zeile_19 += fx_corr_total
             zeile_19 += fx_corr_total
+        # Zeilen 20/22/23 per-Lot gain/loss adjustments
+        gain_adj = d.get('fx_corr_gain_adj', {})
+        loss_adj = d.get('fx_corr_loss_adj', {})
+        zeile_20 += gain_adj.get('Topf1', 0)
+        zeile_23 -= loss_adj.get('Topf1', 0)
+        zeile_22 -= loss_adj.get('Topf2', 0)
     else:
         tageskurs_kapinv_corr = 0
 
