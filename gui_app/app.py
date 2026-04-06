@@ -800,8 +800,10 @@ if csv_cats:
     # Add back stillhalter premium AND cross-year put correction for IBKR comparison
     # (IBKR doesn't separate these — we do, so we reverse for the plausibility check)
     cross_put = d['audit'].get('cross_year_put_total', 0)
-    our_stk_gain = d['stocks_gain_eur'] + d['audit'].get('stillhalter_premium_eur', 0) + cross_put
-    our_stk_loss = d['stocks_loss_eur']
+    no_invstg_gain = d['audit'].get('no_invstg_gain', 0)
+    no_invstg_loss = d['audit'].get('no_invstg_loss', 0)
+    our_stk_gain = d['stocks_gain_eur'] + d['audit'].get('stillhalter_premium_eur', 0) + cross_put + no_invstg_gain
+    our_stk_loss = d['stocks_loss_eur'] + no_invstg_loss
 
     # If InvStG active: add ETF values back for IBKR comparison (IBKR counts ETFs as Aktien)
     # Note: stillhalter_premium_eur already includes the ETF portion — don't add etf_stillhalter again
@@ -812,8 +814,8 @@ if csv_cats:
 
     ibkr_topf2_cats = ["Aktien- und Indexoptionen", "Futures", "Optionen auf Futures (Future-Style)",
                         "Optionen auf Futures", "Anleihen", "Treasury Bills"]
-    our_topf2_gain = d['options_gain_eur'] - d['audit'].get('stillhalter_premium_eur', 0) - d.get('fx_total_gain', 0)
-    our_topf2_loss = d['options_loss_eur'] - d.get('fx_total_loss', 0)
+    our_topf2_gain = d['options_gain_eur'] - d['audit'].get('stillhalter_premium_eur', 0) - d.get('fx_total_gain', 0) - no_invstg_gain
+    our_topf2_loss = d['options_loss_eur'] - d.get('fx_total_loss', 0) - no_invstg_loss
     ibkr_topf2_gain = sum(csv_cats.get(c, {}).get('gain', 0) for c in ibkr_topf2_cats)
     ibkr_topf2_loss = sum(csv_cats.get(c, {}).get('loss', 0) for c in ibkr_topf2_cats)
 

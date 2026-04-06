@@ -497,6 +497,10 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     options_gain = 0.0
     options_loss = 0.0
 
+    # no_invstg ETP tracking (for plausibility check — IBKR counts these as STK/Aktien)
+    no_invstg_gain = 0.0
+    no_invstg_loss = 0.0
+
     # InvStG ETF tracking (KAP-INV)
     etf_invstg_gain = 0.0       # InvStG fund gains (before Teilfreistellung)
     etf_invstg_loss = 0.0       # InvStG fund losses (before Teilfreistellung)
@@ -542,8 +546,10 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     # Crypto/Commodity ETPs: NOT a stock → Topf 2 (§20 Abs. 2 S. 1 Nr. 7 EStG)
                     if pnl_eur > 0:
                         options_gain += pnl_eur
+                        no_invstg_gain += pnl_eur
                     else:
                         options_loss += pnl_eur
+                        no_invstg_loss += pnl_eur
                 else:
                     # InvStG fund → KAP-INV (not Topf 1)
                     if pnl_eur > 0:
@@ -1109,6 +1115,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                             # no_invstg ETPs (Crypto, Commodities) → Topf 2
                             options_gain += gain_eur
                             options_loss += loss_eur
+                            no_invstg_gain += gain_eur
+                            no_invstg_loss += loss_eur
                     else:
                         stocks_gain += gain_eur
                         stocks_loss += loss_eur
@@ -1441,7 +1449,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             "cross_year_premium_eur": cross_year_premium_eur,
             "cross_year_by_year": cross_year_by_year,
             "cross_year_put_corrections": cross_year_put_corrections,
-            "cross_year_put_total": cross_year_put_total
+            "cross_year_put_total": cross_year_put_total,
+            "no_invstg_gain": no_invstg_gain,
+            "no_invstg_loss": no_invstg_loss
         }
     }
 
