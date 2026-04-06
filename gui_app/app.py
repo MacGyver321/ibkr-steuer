@@ -229,6 +229,14 @@ st.markdown("""
 
     /* hide streamlit branding */
     #MainMenu, footer { visibility: hidden; }
+
+    /* ── Checkbox Styling ── */
+    /* Stylt den Text neben der Checkbox */
+    [data-testid="stCheckbox"] label p {
+        color: #94a3b8 !important;
+        font-size: 0.85rem !important;
+        font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
