@@ -278,6 +278,180 @@ def kap_row(zeile: str, label: str, value: float, highlight: bool = False,
 def section_title(text: str):
     st.markdown(f'<div class="section-title">{text}</div>', unsafe_allow_html=True)
 
+def classify_xmls(xml_files):
+    """Parse XMLs to extract accountId and date range, group by account.
+    Returns dict: accountId -> sorted list of {file, from_date, to_date, name, account_name, currency}
+    Latest XML per account = tax year, older = history."""
+    import xml.etree.ElementTree as ET
+    accounts = {}
+    for xml_file in xml_files:
+        try:
+            content = xml_file.getvalue()
+            root = ET.fromstring(content)
+            stmt = root.find('.//FlexStatement')
+            acct = root.find('.//AccountInformation')
+            if stmt is None:
+                continue
+            account_id = stmt.get('accountId', 'unknown')
+            entry = {
+                'file': xml_file,
+                'from_date': stmt.get('fromDate', ''),
+                'to_date': stmt.get('toDate', ''),
+                'name': xml_file.name,
+                'account_name': acct.get('name', '') if acct is not None else '',
+                'currency': acct.get('currency', 'EUR') if acct is not None else 'EUR',
+            }
+            accounts.setdefault(account_id, []).append(entry)
+        except Exception:
+            accounts.setdefault('unknown', []).append({
+                'file': xml_file, 'from_date': '', 'to_date': '',
+                'name': xml_file.name, 'account_name': '', 'currency': 'EUR',
+            })
+    # Sort each account's XMLs by to_date (latest = tax year)
+    for account_id in accounts:
+        accounts[account_id].sort(key=lambda x: x['to_date'])
+    return accounts
+
+def merge_report_data(reports):
+    """Merge multiple report_data dicts (one per account) by summing numeric fields."""
+    if not reports:
+        return {}
+    if len(reports) == 1:
+        return reports[0]
+
+    merged = {}
+
+    # Simple sum fields
+    for field in ['stocks_gain_eur', 'stocks_loss_eur', 'dividends_eur', 'interest_eur',
+                  'debit_interest_eur', 'options_gain_eur', 'options_loss_eur',
+                  'withholding_tax_eur', 'fx_total_gain', 'fx_total_loss', 'fx_translation',
+                  'fx_correction_total']:
+        merged[field] = sum(r.get(field, 0) for r in reports)
+
+    # Recalculated fields
+    merged['stocks_net_eur'] = merged['stocks_gain_eur'] + merged['stocks_loss_eur']
+    merged['options_net_eur'] = merged['options_gain_eur'] + merged['options_loss_eur']
+    merged['topf_1_aktien_netto'] = sum(r.get('topf_1_aktien_netto', 0) for r in reports)
+    merged['topf_2_sonstiges_netto'] = sum(r.get('topf_2_sonstiges_netto', 0) for r in reports)
+    merged['zeile_19_netto_eur'] = merged['topf_1_aktien_netto'] + merged['topf_2_sonstiges_netto']
+    merged['zeile_20_stock_gains_eur'] = sum(r.get('zeile_20_stock_gains_eur', 0) for r in reports)
+    merged['zeile_22_other_losses_eur'] = sum(r.get('zeile_22_other_losses_eur', 0) for r in reports)
+    merged['zeile_23_stock_losses_eur'] = sum(r.get('zeile_23_stock_losses_eur', 0) for r in reports)
+    merged['zeile_41_withholding_tax_eur'] = merged['withholding_tax_eur']
+
+    # Scalars (from first report)
+    merged['base_currency'] = reports[0].get('base_currency', 'EUR')
+    merged['tax_year'] = reports[0].get('tax_year', 2025)
+
+    # Booleans
+    merged['has_trade_price'] = all(r.get('has_trade_price', False) for r in reports)
+    merged['xml_has_fx_data'] = all(r.get('xml_has_fx_data', True) for r in reports)
+    merged['fx_has_prior_data'] = all(r.get('fx_has_prior_data', False) for r in reports)
+
+    # FX source
+    sources = set(r.get('fx_source', 'none') for r in reports)
+    merged['fx_source'] = sources.pop() if len(sources) == 1 else 'mixed'
+
+    # fx_results (by currency)
+    merged_fx = {}
+    for r in reports:
+        for curr, data in r.get('fx_results', {}).items():
+            if curr not in merged_fx:
+                merged_fx[curr] = {'gain': 0, 'loss': 0, 'net': 0}
+            for k in ('gain', 'loss', 'net'):
+                merged_fx[curr][k] += data.get(k, 0)
+    merged['fx_results'] = merged_fx
+
+    # fx_mtm
+    merged_mtm = {}
+    for r in reports:
+        for curr, val in r.get('fx_mtm', {}).items():
+            merged_mtm[curr] = merged_mtm.get(curr, 0) + (val or 0)
+    merged['fx_mtm'] = merged_mtm
+
+    # Dict sum fields
+    for dict_field in ['fx_correction_by_topf', 'fx_corr_gain_adj', 'fx_corr_loss_adj']:
+        merged_dict = {}
+        for r in reports:
+            for k, v in r.get(dict_field, {}).items():
+                merged_dict[k] = merged_dict.get(k, 0) + v
+        merged[dict_field] = merged_dict
+
+    # csv_category_totals (nested dict)
+    merged_csv = {}
+    for r in reports:
+        for cat, data in r.get('csv_category_totals', {}).items():
+            if cat not in merged_csv:
+                merged_csv[cat] = {}
+            for k, v in data.items():
+                merged_csv[cat][k] = merged_csv[cat].get(k, 0) + v
+    merged['csv_category_totals'] = merged_csv
+
+    # csv_income_totals
+    merged_income = {}
+    for r in reports:
+        for k, v in r.get('csv_income_totals', {}).items():
+            merged_income[k] = merged_income.get(k, 0) + v
+    merged['csv_income_totals'] = merged_income
+
+    # KAP-INV merge
+    merged_kap = {
+        'etf_gain_raw_eur': 0, 'etf_loss_raw_eur': 0,
+        'etf_gain_taxable_eur': 0, 'etf_loss_taxable_eur': 0,
+        'etf_dividends_raw_eur': 0, 'etf_dividends_taxable_eur': 0,
+        'etf_wht_eur': 0, 'etf_net_taxable_eur': 0,
+        'etf_by_isin': {}, 'etf_unknown_isins': [],
+        'etf_stillhalter_premium_eur': 0,
+    }
+    for r in reports:
+        ki = r.get('kap_inv', {})
+        for k in ['etf_gain_raw_eur', 'etf_loss_raw_eur', 'etf_gain_taxable_eur',
+                   'etf_loss_taxable_eur', 'etf_dividends_raw_eur', 'etf_dividends_taxable_eur',
+                   'etf_wht_eur', 'etf_net_taxable_eur', 'etf_stillhalter_premium_eur']:
+            merged_kap[k] += ki.get(k, 0)
+        for isin, data in ki.get('etf_by_isin', {}).items():
+            if isin not in merged_kap['etf_by_isin']:
+                merged_kap['etf_by_isin'][isin] = dict(data)
+            else:
+                existing = merged_kap['etf_by_isin'][isin]
+                for nk in ['gain', 'loss', 'div', 'wht', 'gain_taxable', 'loss_taxable', 'div_taxable']:
+                    existing[nk] = existing.get(nk, 0) + data.get(nk, 0)
+        for isin in ki.get('etf_unknown_isins', []):
+            if isin not in merged_kap['etf_unknown_isins']:
+                merged_kap['etf_unknown_isins'].append(isin)
+    merged['kap_inv'] = merged_kap
+
+    # Audit merge
+    merged_audit = {
+        'funds_processed': sum(r.get('audit', {}).get('funds_processed', 0) for r in reports),
+        'funds_skipped_year': sum(r.get('audit', {}).get('funds_skipped_year', 0) for r in reports),
+        'raw_div_base': sum(r.get('audit', {}).get('raw_div_base', 0) for r in reports),
+        'raw_tax_base': sum(r.get('audit', {}).get('raw_tax_base', 0) for r in reports),
+        'added_from_summary': sum(r.get('audit', {}).get('added_from_summary', 0) for r in reports),
+        'usd_to_eur_rates_count': max(r.get('audit', {}).get('usd_to_eur_rates_count', 0) for r in reports),
+        'ecb_rates_used': any(r.get('audit', {}).get('ecb_rates_used', False) for r in reports),
+        'stillhalter_count': sum(r.get('audit', {}).get('stillhalter_count', 0) for r in reports),
+        'stillhalter_premium_eur': sum(r.get('audit', {}).get('stillhalter_premium_eur', 0) for r in reports),
+        'stillhalter_unmatched': [],
+        'stillhalter_details': [],
+        'cross_year_premium_eur': sum(r.get('audit', {}).get('cross_year_premium_eur', 0) for r in reports),
+        'cross_year_by_year': {},
+        'cross_year_put_corrections': [],
+        'cross_year_put_total': sum(r.get('audit', {}).get('cross_year_put_total', 0) for r in reports),
+        'no_invstg_gain': sum(r.get('audit', {}).get('no_invstg_gain', 0) for r in reports),
+        'no_invstg_loss': sum(r.get('audit', {}).get('no_invstg_loss', 0) for r in reports),
+    }
+    for r in reports:
+        a = r.get('audit', {})
+        merged_audit['stillhalter_unmatched'].extend(a.get('stillhalter_unmatched', []))
+        merged_audit['stillhalter_details'].extend(a.get('stillhalter_details', []))
+        merged_audit['cross_year_put_corrections'].extend(a.get('cross_year_put_corrections', []))
+        for year, val in a.get('cross_year_by_year', {}).items():
+            merged_audit['cross_year_by_year'][year] = merged_audit['cross_year_by_year'].get(year, 0) + val
+    merged['audit'] = merged_audit
+
+    return merged
+
 # inline color vars for kap_row values
 COLOR_VARS = """
 <style>
@@ -325,33 +499,24 @@ st.markdown("""
 
 st.markdown("""
 <div style="background: rgba(59,130,246,0.08); border-left: 3px solid #3b82f6; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.82rem; color: #cbd5e1; line-height: 1.6;">
-    <strong style="color: #60a5fa; font-size: 0.9rem;">1. Flex Query XML (Pflicht)</strong><br>
-    Die Hauptdatenquelle. Enthält alle Trades, Dividenden, Zinsen, Quellensteuer und Stillhalter-Details.
-    Daraus werden die Anlage KAP Zeilen berechnet (Topf 1 Aktien, Topf 2 Sonstiges, Stillhalterprämien-Separation).<br>
+    <strong style="color: #60a5fa; font-size: 0.9rem;">1. Flex Query XMLs hochladen (Pflicht)</strong><br>
+    Alle IBKR Flex Query XMLs auf einmal hochladen: Steuerjahr und ggf. Vorjahre, auch von mehreren Konten.
+    Die Konten werden automatisch anhand der Konto-ID erkannt und Vorjahre korrekt zugeordnet.<br>
+    <span style="color: #94a3b8; font-size: 0.78rem;">
+    <strong>Mehrere Konten:</strong> Jedes Konto wird separat berechnet (eigene Trades, FX, Stillhalter). Die Ergebnisse werden addiert.
+    Alle Konten müssen dieselbe Basiswährung (EUR oder USD) haben.<br>
+    <strong>Vorjahres-XMLs:</strong> Nur nötig bei Optionen über den Jahreswechsel (Stillhalter-Matching) oder für exakte FX-FIFO-Lots.
+    </span><br>
     <span style="color: #64748b;">IBKR &rarr; Performance &amp; Berichte &rarr; Flex-Abfragen &rarr; XML exportieren (gewünschter Zeitraum)</span>
 </div>
 """, unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("IBKR Flex Query hochladen - Steuerjahr (XML)", type="xml",
-                                  label_visibility="collapsed")
-
-st.markdown("""
-<div style="background: rgba(168,85,247,0.06); border-left: 3px solid #a855f7; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.82rem; color: #cbd5e1; line-height: 1.6;">
-    <strong style="color: #c084fc; font-size: 0.9rem;">2. Vorjahres-XMLs (Optional)</strong><br>
-    Nur nötig wenn Optionen (Calls oder Puts) über den Jahreswechsel gehalten wurden. Beispiel: Option 2024 verkauft,
-    2025 durch Assignment geschlossen. Die Stillhalterprämie muss per Zuflussprinzip (BMF Rn. 25)
-    dem Verkaufsjahr zugeordnet werden. Dafür wird der Original-Trade aus der Vorjahres-XML benötigt.
-</div>
-""", unsafe_allow_html=True)
-
-fx_history_files = st.file_uploader(
-    "Optional: Vorjahres-XMLs für Stillhalter-Matching & FX-FIFO",
-    type="xml", accept_multiple_files=True,
-    label_visibility="visible")
+uploaded_xml_files = st.file_uploader("IBKR Flex Query XMLs hochladen", type="xml",
+                                       accept_multiple_files=True, label_visibility="collapsed")
 
 st.markdown("""
 <div style="background: rgba(16,185,129,0.08); border-left: 3px solid #10b981; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; font-size: 0.82rem; color: #cbd5e1; line-height: 1.6;">
-    <strong style="color: #34d399; font-size: 0.9rem;">3. IBKR Standard-Bericht CSV (Plausibilitätscheck)</strong><br>
+    <strong style="color: #34d399; font-size: 0.9rem;">2. IBKR Standard-Bericht CSV (Plausibilitätscheck)</strong><br>
     <strong style="color: #6ee7b7;">Automatischer Plausibilitätscheck:</strong>
     Der IBKR-Bericht enthält aggregierte Summen pro Kategorie (Aktien, Optionen, Futures, Anleihen, Devisen, Dividenden, Zinsen, Quellensteuer).
     Diese werden automatisch mit unserer Einzelberechnung aus der Flex Query XML verglichen — cent-genaue Übereinstimmung ist das Ziel.<br><br>
@@ -361,6 +526,9 @@ st.markdown("""
     <strong style="color: #a7f3d0;">So erstellen:</strong>
     IBKR &rarr; Performance &amp; Berichte &rarr; Kontoauszüge &rarr;
     <strong>Übersicht: realisierter G&amp;V</strong> &rarr; Zeitraum wählen &rarr; Format: CSV &rarr; Erstellen
+    </span><br>
+    <span style="color: #94a3b8; font-size: 0.78rem;">
+    <strong>Hinweis:</strong> Bei mehreren Konten wird der CSV-Bericht bisher nur für das erste Konto verwendet.
     </span>
 </div>
 """, unsafe_allow_html=True)
@@ -370,44 +538,123 @@ ibkr_csv_file = st.file_uploader(
     type="csv",
     label_visibility="visible")
 
-if uploaded_file is None:
+if not uploaded_xml_files:
     st.stop()
 
 # ── Processing ───────────────────────────────────────────────────────────────
 
+# ── Classify XMLs by account ────────────────────────────────────────────────
+
+accounts = classify_xmls(uploaded_xml_files)
+if not accounts:
+    st.stop()
+
+# Determine global tax year from latest XML across all accounts
+all_to_dates = [xml['to_date'] for xmls in accounts.values() for xml in xmls]
+global_tax_year = max(all_to_dates)[:4] if all_to_dates else '2025'
+
+# Split: accounts with a tax-year XML vs. history-only accounts
+accounts_to_process = {}
+accounts_skipped = []
+for acct_id, xmls in accounts.items():
+    if xmls[-1]['to_date'][:4] == global_tax_year:
+        accounts_to_process[acct_id] = xmls
+    else:
+        acct_label = xmls[-1]['account_name'] or acct_id
+        accounts_skipped.append(f"{acct_label} ({acct_id}, nur bis {xmls[-1]['to_date'][:4]})")
+
+if not accounts_to_process:
+    st.error("Keine XML für das Steuerjahr gefunden.")
+    st.stop()
+
+if len(accounts_to_process) > 1:
+    # Validate: all accounts same base currency
+    currencies = {xmls[-1]['currency'] for xmls in accounts_to_process.values()}
+    if len(currencies) > 1:
+        st.error(f"Unterschiedliche Basiswährungen erkannt: **{', '.join(currencies)}**. "
+                 f"Alle Konten müssen dieselbe Basiswährung haben.")
+        st.stop()
+
+if len(accounts) > 1:
+    acct_info = []
+    for acct_id, xmls in sorted(accounts_to_process.items()):
+        name = xmls[-1]['account_name'] or acct_id
+        years = f"{xmls[0]['from_date'][:4]}–{xmls[-1]['to_date'][:4]}" if len(xmls) > 1 else xmls[0]['to_date'][:4]
+        acct_info.append(f"<strong>{name}</strong> ({acct_id}, {len(xmls)} XML{'s' if len(xmls)>1 else ''}, {years})")
+    msg = f"<strong style=\"color: #818cf8;\">{len(accounts_to_process)} Konto{'n' if len(accounts_to_process)>1 else ''} für {global_tax_year}</strong>"
+    if accounts_skipped:
+        msg += f" — {len(accounts_skipped)} übersprungen (kein {global_tax_year}-XML)"
+    st.markdown(f"""
+<div style="background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.25); border-radius: 10px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    {msg}<br>
+    {'&ensp;·&ensp;'.join(acct_info)}
+</div>
+""", unsafe_allow_html=True)
+
+if accounts_skipped:
+    st.markdown(f"""
+<div style="background: rgba(251,191,36,0.06); border: 1px solid rgba(251,191,36,0.2); border-radius: 10px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-size: 0.78rem; color: #94a3b8;">
+    <strong style="color: #fbbf24;">Übersprungen:</strong> {', '.join(accounts_skipped)} — keine Daten für Steuerjahr {global_tax_year} vorhanden.
+</div>
+""", unsafe_allow_html=True)
+
+# ── Processing ───────────────────────────────────────────────────────────────
+
 with st.spinner("Berechne Steuerreport…"):
-    with tempfile.TemporaryDirectory() as tmp:
-        xml_path = os.path.join(tmp, "input.xml")
-        with open(xml_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+    reports = []
+    account_names = []
 
-        # Save history XMLs if provided
-        history_paths = []
-        for i, hf in enumerate(fx_history_files or []):
-            hp = os.path.join(tmp, f"history_{i}.xml")
-            with open(hp, "wb") as f:
-                f.write(hf.getbuffer())
-            history_paths.append(hp)
+    for acct_id, xmls in sorted(accounts_to_process.items()):
+        main_xml = xmls[-1]  # Latest = tax year
+        history_xmls = xmls[:-1]  # Older = history
+        acct_label = main_xml['account_name'] or acct_id
 
-        # Save CSV report if provided
-        csv_report_path = None
-        if ibkr_csv_file is not None:
-            csv_report_path = os.path.join(tmp, "ibkr_report.csv")
-            with open(csv_report_path, "wb") as f:
-                f.write(ibkr_csv_file.getbuffer())
+        with tempfile.TemporaryDirectory() as tmp:
+            # Save main XML
+            xml_path = os.path.join(tmp, "input.xml")
+            with open(xml_path, "wb") as f:
+                f.write(main_xml['file'].getbuffer())
 
-        try:
-            if history_paths:
-                # Multi-XML: merge FX history from all files
-                all_xmls = sorted(history_paths) + [xml_path]
-                extract_ibkr_data.extract_fx_multi_xml(all_xmls, tmp)
-            else:
-                extract_ibkr_data.parse_ibkr_xml(xml_path, tmp)
-            d = calculate_tax_report.calculate_tax(tmp, fx_csv_path=csv_report_path)
-        except Exception as e:
-            st.error(f"Fehler beim Verarbeiten: {e}")
-            st.exception(e)
-            st.stop()
+            # Save history XMLs
+            history_paths = []
+            for i, hxml in enumerate(history_xmls):
+                hp = os.path.join(tmp, f"history_{i}.xml")
+                with open(hp, "wb") as f:
+                    f.write(hxml['file'].getbuffer())
+                history_paths.append(hp)
+
+            # Save CSV report (only for first account)
+            csv_report_path = None
+            if ibkr_csv_file is not None and len(reports) == 0:
+                csv_report_path = os.path.join(tmp, "ibkr_report.csv")
+                with open(csv_report_path, "wb") as f:
+                    f.write(ibkr_csv_file.getbuffer())
+
+            try:
+                if history_paths:
+                    all_xmls_paths = sorted(history_paths) + [xml_path]
+                    extract_ibkr_data.extract_fx_multi_xml(all_xmls_paths, tmp)
+                else:
+                    extract_ibkr_data.parse_ibkr_xml(xml_path, tmp)
+                d_acct = calculate_tax_report.calculate_tax(tmp, fx_csv_path=csv_report_path)
+
+                # Validate base currency consistency
+                if reports and d_acct.get('base_currency') != reports[0].get('base_currency'):
+                    st.error(f"Konto **{acct_label}** hat Basiswährung "
+                             f"**{d_acct.get('base_currency')}**, erwartet "
+                             f"**{reports[0].get('base_currency')}**.")
+                    st.stop()
+
+                reports.append(d_acct)
+                account_names.append(acct_label)
+            except Exception as e:
+                st.error(f"Fehler beim Verarbeiten von Konto **{acct_label}**: {e}")
+                st.exception(e)
+                st.stop()
+
+    # Merge all accounts
+    d = merge_report_data(reports)
+    n_accounts = len(reports)
 
 # Derived values
 steuerjahr = d.get('tax_year', 2025)
@@ -560,6 +807,13 @@ base_icon = "🇪🇺" if base_curr == "EUR" else "🇺🇸"
 st.markdown(f"""
 <div style="background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.25); border-radius: 10px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
     {base_icon} <strong style="color: #818cf8;">Basiswährung: {base_curr}</strong> — {"Beträge in StmtFunds sind bereits in EUR (BaseCurrency-Ansicht)." if base_curr == "EUR" else "USD-Beträge werden über tägliche Wechselkurse in EUR umgerechnet."}
+</div>
+""", unsafe_allow_html=True)
+
+if n_accounts > 1:
+    st.markdown(f"""
+<div style="background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); border-radius: 10px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #fbbf24;">{n_accounts} Konten zusammengeführt</strong> — Jedes Konto wurde separat berechnet, die Ergebnisse wurden addiert.
 </div>
 """, unsafe_allow_html=True)
 
@@ -897,6 +1151,24 @@ if has_etf_data and invstg_aktiv:
     kap_rows_html += kap_row("KAP-INV", "Anrechenbare Quellensteuer (ETF)", etf_wht)
 
 st.markdown(kap_rows_html, unsafe_allow_html=True)
+
+# ── Multi-Account Breakdown ─────────────────────────────────────────────────
+
+if n_accounts > 1:
+    with st.expander(f"Aufschlüsselung nach Konten ({n_accounts} Konten)"):
+        acct_table = "| Konto | Topf 1 (Aktien) | Topf 2 (Sonstiges) | Z. 19 (Netto) | Z. 41 (QSt) |\n"
+        acct_table += "|-------|----------------:|-------------------:|--------------:|------------:|\n"
+        for idx, (name, rep) in enumerate(zip(account_names, reports)):
+            t1 = rep.get('topf_1_aktien_netto', 0)
+            t2 = rep.get('topf_2_sonstiges_netto', 0)
+            z19 = rep.get('zeile_19_netto_eur', t1 + t2)
+            z41 = rep.get('withholding_tax_eur', 0)
+            label = f"Konto {idx+1} ({name})"
+            acct_table += f"| {label} | {fmt_de(t1)} | {fmt_de(t2)} | {fmt_de(z19)} | {fmt_de(z41)} |\n"
+        acct_table += f"| **Gesamt** | **{fmt_de(topf_1)}** | **{fmt_de(adj_topf_2)}** | **{fmt_de(adj_zeile_19)}** | **{fmt_de(quellensteuer)}** |\n"
+        st.markdown(acct_table)
+        st.info("Jedes Konto wurde vollständig separat berechnet (eigene Trades, Dividenden, FX-Berechnung, "
+                "Stillhalter-Erkennung). Die Einzelergebnisse wurden anschließend addiert.")
 
 # ── Zuflussprinzip Details ────────────────────────────────────────────────────
 
@@ -1270,9 +1542,14 @@ if has_etf_data and invstg_aktiv:
         gv_tax = info.get('gain_taxable', 0) + info.get('loss_taxable', 0)
         inv_export += f"    {info.get('ticker', isin):8s} TFS {info.get('tfs_rate', 0)*100:.0f}%  G/V stpfl. {fmt_de(gv_tax):>10} EUR\n"
 
+multi_acct_export = ""
+if n_accounts > 1:
+    multi_acct_export = f"Konten: {n_accounts} (separat berechnet, Ergebnisse addiert)\n"
+
 report_text = f"""ANLAGE KAP {steuerjahr} - Steuerbericht
 Erstellt: {_dt.now().strftime('%d.%m.%Y %H:%M')}
 Basiswährung: {d.get('base_currency', 'USD')}
+{multi_acct_export}
 
 ═══════════════════════════════════════════════════
 TOPF 1: AKTIEN (ohne ETF-Fonds)

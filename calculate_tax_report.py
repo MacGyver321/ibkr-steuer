@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 def load_csv(filepath):
+    if not os.path.exists(filepath):
+        return []
     with open(filepath, 'r', encoding='utf-8') as f:
         return list(csv.DictReader(f))
 
@@ -385,6 +387,15 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
 
     # 1. Load and Deduplicate Trades
     all_trades = load_csv(os.path.join(ib_tax_dir, 'trades.csv'))
+    if not all_trades:
+        # Check if the XML was parsed at all
+        if not os.path.exists(os.path.join(ib_tax_dir, 'trades.csv')):
+            raise FileNotFoundError(
+                "Die Flex Query XML enthält keine <Trades>-Sektion. "
+                "Bitte prüfen Sie Ihre Flex Query Konfiguration in IBKR: "
+                "Reports → Flex Queries → die Query bearbeiten → sicherstellen dass "
+                "'Trade Confirmation' oder 'Trades' als Sektion aktiviert ist."
+            )
     
     unique_trades_set = set()
     trades = []
