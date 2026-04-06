@@ -763,6 +763,7 @@ fx_corr_by_topf = d.get('fx_correction_by_topf', {})
 tk_gain_adj = d.get('fx_corr_gain_adj', {})
 tk_loss_adj = d.get('fx_corr_loss_adj', {})
 tageskurs_aktiv = False
+tageskurs_kapinv_corr = 0
 
 if abs(fx_corr_total) > 0.01:
     st.markdown(f"""
