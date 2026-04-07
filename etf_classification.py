@@ -1,7 +1,7 @@
 """
 ETF-Klassifikation nach deutschem InvStG (Investmentsteuergesetz).
 
-Lookup-Tabelle der ~110 meistgehandelten US-ETFs mit ISIN und Klassifikation
+Lookup-Tabelle der ~250 meistgehandelten ETFs/ETPs mit ISIN und Klassifikation
 fuer die Berechnung der Teilfreistellung:
   - aktienfonds:      30% Teilfreistellung (>= 51% Aktienquote)
   - mischfonds:       15% Teilfreistellung (25-50% Aktienquote)
@@ -125,6 +125,47 @@ ETF_CLASSIFICATION = {
     'US46138G7060': ('TAN',  'Invesco Solar ETF',                                'aktienfonds'),   # cbonds /etf/3033/
     'US4642882249': ('ICLN', 'iShares Global Clean Energy ETF',                  'aktienfonds'),   # cbonds /etf/1023/
 
+    # --- Weitere Aktien-ETFs (Björn-Audit, April 2026) ---
+    'US37950E4090': ('CHIQ', 'Global X MSCI China Consumer Discretionary ETF',   'aktienfonds'),
+    'US37954Y4420': ('CLOU', 'Global X Cloud Computing ETF',                     'aktienfonds'),
+    'US78467X2090': ('DIA',  'SPDR Dow Jones Industrial Average ETF Trust',      'aktienfonds'),   # alt. ISIN
+    'US0321088883': ('DIVO', 'Amplify CWP Enhanced Dividend Income ETF',         'aktienfonds'),
+    'US37954Y4677': ('EBIZ', 'Global X E-commerce ETF',                          'aktienfonds'),
+    'US4642872341': ('EEM',  'iShares MSCI Emerging Markets ETF',                'aktienfonds'),   # alt. ISIN
+    'US4642891232': ('ENZL', 'iShares MSCI New Zealand ETF',                     'aktienfonds'),
+    'US4642865095': ('EWC',  'iShares MSCI Canada ETF',                          'aktienfonds'),
+    'US4642877730': ('EWJ',  'iShares MSCI Japan ETF',                           'aktienfonds'),   # alt. ISIN
+    'US4642883523': ('EWT',  'iShares MSCI Taiwan ETF',                          'aktienfonds'),   # alt. ISIN
+    'US33735T1097': ('FDD',  'First Trust STOXX European Select Dividend Index Fund', 'aktienfonds'),
+    'US33734X1054': ('FDN',  'First Trust Dow Jones Internet Index Fund',        'aktienfonds'),
+    'US33733E1008': ('FPX',  'First Trust US Equity Opportunities ETF',          'aktienfonds'),
+    'US4642875017': ('IAI',  'iShares U.S. Broker-Dealers & Securities Exchanges ETF', 'aktienfonds'),
+    'US4642876557': ('IWM',  'iShares Russell 2000 ETF',                         'aktienfonds'),   # alt. ISIN
+    'US4642877696': ('IWS',  'iShares Russell Mid-Cap Value ETF',                'aktienfonds'),
+    'US4642871771': ('IYF',  'iShares U.S. Financials ETF',                      'aktienfonds'),
+    'US78464A7939': ('KCE',  'SPDR S&P Capital Markets ETF',                     'aktienfonds'),
+    'US5007678502': ('KGRN', 'KraneShares MSCI China Clean Technology ETF',      'aktienfonds'),
+    'US78464A7468': ('KIE',  'SPDR S&P Insurance ETF',                           'aktienfonds'),
+    'US78464A7394': ('KRE',  'SPDR S&P Regional Banking ETF',                    'aktienfonds'),
+    'US37954Y8559': ('LIT',  'Global X Lithium & Battery Tech ETF',              'aktienfonds'),   # alt. ISIN
+    'US46090E2017': ('PPA',  'Invesco Aerospace & Defense ETF',                  'aktienfonds'),
+    'US46137V1180': ('PSP',  'Invesco Global Listed Private Equity ETF',         'aktienfonds'),
+    'US8085248694': ('SCHX', 'Schwab U.S. Large-Cap ETF',                        'aktienfonds'),
+    'US8123501061': ('SHLD', 'Global X Defense Tech ETF',                        'aktienfonds'),
+    'US92189F6093': ('SLX',  'VanEck Steel ETF',                                 'aktienfonds'),
+    'US46138G1031': ('TAN',  'Invesco Solar ETF',                                'aktienfonds'),   # alt. ISIN
+    'US4642867158': ('TUR',  'iShares MSCI Turkey ETF',                          'aktienfonds'),
+    'US9220427752': ('VGK',  'Vanguard FTSE Europe ETF',                         'aktienfonds'),
+    'US9229088637': ('VOO',  'Vanguard S&P 500 ETF',                             'aktienfonds'),   # alt. ISIN
+    'US9229087286': ('VTV',  'Vanguard Value Index Fund ETF Shares',             'aktienfonds'),   # alt. ISIN
+    'US78464A7307': ('XAR',  'SPDR S&P Aerospace & Defense ETF',                 'aktienfonds'),
+    'US78464A8690': ('XES',  'SPDR S&P Oil & Gas Equipment & Services ETF',      'aktienfonds'),
+    'US78464A8504': ('XHB',  'SPDR S&P Homebuilders ETF',                        'aktienfonds'),
+    'US78464A7144': ('XRT',  'SPDR S&P Retail ETF',                              'aktienfonds'),
+    'US78464A8488': ('XSD',  'SPDR S&P Semiconductor ETF',                       'aktienfonds'),
+    'US78467Y1070': ('XSM',  'SPDR S&P MidCap 400 ETF',                          'aktienfonds'),
+    'US4642883984': ('XUS',  'iShares MSCI ACWI ex U.S. ETF',                    'aktienfonds'),
+
     # --- Commodity-ETFs (Futures/Derivate-basiert, keine Aktien) ---
     'US46138B1035': ('DBC',  'Invesco DB Commodity Index Tracking Fund',         'sonstiger_fonds'),  # Commodity Pool, Futures
     'US46428R1077': ('GSG',  'iShares S&P GSCI Commodity-Indexed Trust',         'sonstiger_fonds'),  # Commodity Pool, Futures
@@ -139,6 +180,7 @@ ETF_CLASSIFICATION = {
     'US74347X8645': ('UPRO', 'ProShares UltraPro S&P500 (3x S&P 500)',         'sonstiger_fonds'),   # cbonds /etf/4207/
     'US74350P6593': ('SPXU', 'ProShares UltraPro Short S&P500 (-3x S&P 500)',  'sonstiger_fonds'),   # cbonds /etf/10929/
     'US74347R1077': ('SSO',  'ProShares Ultra S&P500 (2x S&P 500)',            'sonstiger_fonds'),   # cbonds /etf/4189/
+    'US74347A8351': ('SSO',  'ProShares Ultra S&P500 (2x S&P 500)',            'sonstiger_fonds'),   # alt. ISIN
     'US25459W4583': ('SOXL', 'Direxion Daily Semiconductor Bull 3X Shares',     'sonstiger_fonds'),   # cbonds /etf/5683/
     'US25460G1123': ('SOXS', 'Direxion Daily Semiconductor Bear 3X Shares',     'sonstiger_fonds'),   # cbonds /etf/5681/
     'US74347Y7489': ('BOIL', 'ProShares Ultra Bloomberg Natural Gas (2x)',       'sonstiger_fonds'),  # 2x leveraged Nat Gas Futures
@@ -194,6 +236,67 @@ ETF_CLASSIFICATION = {
     'US82889N8636': ('SVOL', 'Simplify Volatility Premium ETF',                 'sonstiger_fonds'),  # cbonds /etf/11381/
     'US92891H1014': ('SVIX', '-1x Short VIX Futures ETF',                       'sonstiger_fonds'),  # cbonds /etf/14315/
     'US74347Y6804': ('UVXY', 'ProShares Ultra VIX Short-Term Futures ETF',      'sonstiger_fonds'),  # cbonds /etf/835/
+    'US74347X8492': ('UVXY', 'ProShares Ultra VIX Short-Term Futures ETF',      'sonstiger_fonds'),  # alt. ISIN
+
+    # --- Weitere Leveraged/Inverse ETFs (Björn-Audit, April 2026) ---
+    'US25459L8820': ('CURE', 'Direxion Daily Healthcare Bull 3X Shares',         'sonstiger_fonds'),
+    'US25459L7642': ('DFEN', 'Direxion Daily Aerospace & Defense Bull 3X Shares','sonstiger_fonds'),
+    'US25459L7691': ('DPST', 'Direxion Daily Regional Banks Bull 3X Shares',     'sonstiger_fonds'),
+    'US74347F7061': ('EDC',  'Direxion Daily MSCI Emerging Markets Bull 3X Shares', 'sonstiger_fonds'),
+    'US74347F7022': ('EFO',  'ProShares Ultra MSCI EAFE',                        'sonstiger_fonds'),
+    'US25459L7984': ('EURL', 'Direxion Daily FTSE Europe Bull 3X Shares',        'sonstiger_fonds'),
+    'US25459L7078': ('FAS',  'Direxion Daily Financial Bull 3X Shares',          'sonstiger_fonds'),
+    'US25459L6659': ('INDL', 'Direxion Daily MSCI India Bull 2x Shares',         'sonstiger_fonds'),
+    'US25459L7896': ('MEXX', 'Direxion Daily MSCI Mexico Bull 3X Shares',        'sonstiger_fonds'),
+    'US25459L7918': ('NAIL', 'Direxion Daily Homebuilders & Supplies Bull 3X Shares', 'sonstiger_fonds'),
+    'US69347Q1076': ('PILL', 'Direxion Daily Pharmaceutical & Medical Bull 3X Shares', 'sonstiger_fonds'),
+    'US74347A8440': ('QLD',  'ProShares Ultra QQQ',                              'sonstiger_fonds'),
+    'US25459L7609': ('RXD',  'ProShares UltraShort Health Care',                 'sonstiger_fonds'),
+    'US25459L7136': ('SPXL', 'Direxion Daily S&P 500 Bull 3X Shares',           'sonstiger_fonds'),
+    'US74347B2016': ('TBT',  'ProShares UltraShort 20+ Year Treasury',          'sonstiger_fonds'),
+    'US25459L7285': ('TNA',  'Direxion Daily Small Cap Bull 3X Shares',          'sonstiger_fonds'),
+    'US74347F8164': ('UGL',  'ProShares Ultra Gold',                             'sonstiger_fonds'),
+    'US74347B7421': ('URTY', 'ProShares UltraPro Russell 2000',                  'sonstiger_fonds'),
+    'US25459L7376': ('UTSL', 'Direxion Daily Utilities Bull 3X Shares',          'sonstiger_fonds'),
+    'US25459Y8012': ('WANT', 'Direxion Daily Consumer Discretionary Bull 3X Shares', 'sonstiger_fonds'),
+    'US25459L7437': ('YINN', 'Direxion Daily FTSE China Bull 3X Shares',         'sonstiger_fonds'),
+    'US74347F8157': ('AGQ',  'ProShares Ultra Silver',                           'sonstiger_fonds'),
+    'US25459L7094': ('NUGT', 'Direxion Daily Gold Miners Index Bull 2X Shares',  'sonstiger_fonds'),  # alt. ISIN
+
+    # --- Weitere Anleihen-ETFs (Björn-Audit) ---
+    'US46138G8050': ('BAB',  'Invesco Taxable Municipal Bond ETF',               'sonstiger_fonds'),
+    'US78468R7068': ('CWB',  'SPDR Bloomberg Convertible Securities ETF',        'sonstiger_fonds'),
+    'US92189H4092': ('HYD',  'VanEck High-Yield Muni ETF',                       'sonstiger_fonds'),
+    'US92189F3872': ('SHYD', 'VanEck Short High Yield Muni ETF',                 'sonstiger_fonds'),
+    'US4642885133': ('HYG',  'iShares iBoxx $ High Yield Corporate Bond ETF',    'sonstiger_fonds'),  # alt. ISIN
+    'US4642872429': ('LQD',  'iShares iBoxx $ Investment Grade Corporate Bond ETF', 'sonstiger_fonds'),  # alt. ISIN
+    'US78468R8785': ('JNK',  'SPDR Bloomberg High Yield Bond ETF',               'sonstiger_fonds'),
+    'US46138G7896': ('PCY',  'Invesco Emerging Markets Sovereign Debt ETF',      'sonstiger_fonds'),
+    'US69347A5369': ('PICB', 'Invesco International Corporate Bond ETF',         'sonstiger_fonds'),
+    'US4642871763': ('TIP',  'iShares TIPS Bond ETF',                            'sonstiger_fonds'),  # alt. ISIN
+    'US97717Y5270': ('USFR', 'WisdomTree Floating Rate Treasury Fund',           'sonstiger_fonds'),
+    'US02072L5654': ('BOXX', 'Alpha Architect 1-3 Month Box ETF',               'sonstiger_fonds'),
+    'US82889N8552': ('PFIX', 'Simplify Interest Rate Hedge ETF',                 'sonstiger_fonds'),
+
+    # --- Covered-Call / Income-Strategie ETFs (Derivate-basiert) ---
+    'US46641Q3323': ('JEPI', 'JPMorgan Equity Premium Income ETF',               'sonstiger_fonds'),
+    'US46654Q2038': ('JEPQ', 'JPMorgan Nasdaq Equity Premium Income ETF',        'sonstiger_fonds'),
+    'US88634T7827': ('NFLY', 'YieldMax NFLX Option Income Strategy ETF',         'sonstiger_fonds'),
+    'US88634T7744': ('NVDY', 'YieldMax NVDA Option Income Strategy ETF',         'sonstiger_fonds'),
+
+    # --- Commodity-Fonds (Futures-basiert, Fund-Struktur) ---
+    'US4642878501': ('COMT', 'iShares GSCI Commodity Dynamic Roll Strategy ETF', 'sonstiger_fonds'),
+    'US46138G1013': ('DBC',  'Invesco DB Commodity Index Tracking Fund',         'sonstiger_fonds'),  # alt. ISIN
+    'US88107A1051': ('WEAT', 'Teucrium Wheat Fund',                              'sonstiger_fonds'),
+    'US11410J2026': ('BDRY', 'Breakwave Dry Bulk Shipping ETF',                  'sonstiger_fonds'),
+    'US97717W8281': ('GDE',  'WisdomTree Efficient Gold Plus Equity Strategy Fund', 'sonstiger_fonds'),
+
+    # --- Waehrungs-ETFs ---
+    'US46138K1034': ('FXE',  'Invesco CurrencyShares Euro Currency Trust',       'sonstiger_fonds'),
+
+    # --- Sonstige Strategie-ETFs ---
+    'US00162Q1067': ('BTAL', 'AGF U.S. Market Neutral Anti-Beta Fund',           'sonstiger_fonds'),
+    'US37950E4733': ('MLPA', 'Global X MLP ETF',                                 'sonstiger_fonds'),
 
     # ═══════════════════════════════════════════════════════════════════════════
     # NO_INVSTG — Kein Investmentfonds i.S.d. InvStG
@@ -214,6 +317,47 @@ ETF_CLASSIFICATION = {
 
     # --- ETNs (Schuldverschreibungen, kein Fonds) ---
     'US06748M1962': ('VXX',  'iPath Series B S&P 500 VIX Short-Term Futures ETN', 'no_invstg'),  # ETN = Inhaberschuldverschreibung
+    'US06747R4772': ('VXX',  'iPath Series B S&P 500 VIX Short-Term Futures ETN', 'no_invstg'),  # alt. ISIN
+    'US06748M1889': ('VXZ',  'iPath Series B S&P 500 VIX Mid-Term Futures ETN',  'no_invstg'),  # ETN
+    'US62386A6997': ('FNGU', 'MicroSectors FANG+ Index 3X Leveraged ETN',        'no_invstg'),  # ETN
+    'US06742L4785': ('JJG',  'iPath Series B Bloomberg Grains Subindex Total Return ETN', 'no_invstg'),  # ETN
+    'US06742W5R66': ('DLBR', 'Barclays ETN+ FI Enhanced Global High Yield ETN',  'no_invstg'),  # ETN
+
+    # --- Deutsche Gold-ETCs (physisch besichert, kein Investmentfonds) ---
+    'DE000EWG2LD7': ('EWG2',  'EUWAX Gold II',                                   'no_invstg'),  # physisches Gold-ETC
+    'DE000EWG0LD1': ('GOLD1', 'EUWAX Gold I',                                    'no_invstg'),  # physisches Gold-ETC
+    'DE000A0S9GB0': ('4GLD',  'Xetra-Gold',                                      'no_invstg'),  # physisches Gold-ETC
+
+    # --- Gehebelte/Inverse Rohstoff-ETPs (kein Investmentfonds) ---
+    'IE00B6X4BP29': ('3GOS',  'WisdomTree Gold 3x Daily Short',                  'no_invstg'),  # gehebeltes ETP, Schuldverschreibung
+
+    # --- Physische Rohstoff-Trusts (kein Fonds) ---
+    'US01924U1097': ('PALL',  'Aberdeen Standard Physical Palladium Shares ETF', 'no_invstg'),  # physischer Palladium-Trust
+    'US9129087967': ('CPER',  'United States Copper Index Fund LP',              'no_invstg'),  # Commodity Pool LP, einzelner Basiswert
+
+    # --- Closed-End Funds (keine offenen Investmentfonds i.S.d. InvStG) ---
+    'US00302L1089': ('AWP',  'Aberdeen Global Premier Properties Fund',          'no_invstg'),  # CEF
+    'US6706ER1015': ('BXMX', 'Nuveen S&P 500 Buy-Write Income Fund',            'no_invstg'),  # CEF
+    'US1846911030': ('CBA',  'ClearBridge American Energy MLP Fund',             'no_invstg'),  # CEF
+    'US94987B1052': ('EAD',  'Wells Fargo Income Opportunities Fund',            'no_invstg'),  # CEF
+    'US27828Q1058': ('EFR',  'Eaton Vance Senior Floating-Rate Trust',           'no_invstg'),  # CEF
+    'US27827X1019': ('EIM',  'Eaton Vance Municipal Bond Fund',                  'no_invstg'),  # CEF
+    'US27828X1000': ('ETB',  'Eaton Vance Tax-Managed Buy-Write Income Fund',    'no_invstg'),  # CEF
+    'US27828H1059': ('EVV',  'Eaton Vance Limited Duration Income Fund',         'no_invstg'),  # CEF
+    'US27829F1084': ('EXG',  'Eaton Vance Tax-Managed Global Diversified Equity Income Fund', 'no_invstg'),  # CEF
+    'US31647Q1067': ('FMO',  'Fiduciary/Claymore Energy Infrastructure Fund',    'no_invstg'),  # CEF
+    'US87911K1007': ('HQL',  'Tekla Life Sciences Investors',                    'no_invstg'),  # CEF
+    'US67073B1061': ('JPC',  'Nuveen Preferred & Income Opportunities Fund',     'no_invstg'),  # CEF
+    'US55607W1009': ('MFD',  'Macquarie/First Trust Global Infrastructure/Utilities Dividend Fund', 'no_invstg'),  # CEF
+    'US95766M1053': ('MMU',  'Western Asset Managed Municipals Fund',            'no_invstg'),  # CEF
+    'US0188251096': ('NCZ',  'AllianzGI Convertible & Income Fund II',           'no_invstg'),  # CEF
+    'US6706821039': ('NMZ',  'Nuveen Municipal High Income Opportunity Fund',    'no_invstg'),  # CEF
+    'US89148B1017': ('NTG',  'Tortoise Midstream Energy Fund',                   'no_invstg'),  # CEF
+    'US76970B1017': ('RIF',  'RMR Real Estate Income Fund',                      'no_invstg'),  # CEF
+    'US19247X1000': ('RNP',  'Cohen & Steers REIT and Preferred Income Fund',    'no_invstg'),  # CEF
+    'US2316312014': ('SRV',  'Cushing MLP & Infrastructure Total Return Fund',   'no_invstg'),  # CEF
+    'US19248A1097': ('UTF',  'Cohen & Steers Infrastructure Fund',               'no_invstg'),  # CEF
+    'US46131M1062': ('VGM',  'Invesco Trust for Investment Grade Municipals',    'no_invstg'),  # CEF
 }
 
 

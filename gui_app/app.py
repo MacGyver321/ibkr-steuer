@@ -447,12 +447,19 @@ def merge_report_data(reports):
         'cross_year_put_total': sum(r.get('audit', {}).get('cross_year_put_total', 0) for r in reports),
         'no_invstg_gain': sum(r.get('audit', {}).get('no_invstg_gain', 0) for r in reports),
         'no_invstg_loss': sum(r.get('audit', {}).get('no_invstg_loss', 0) for r in reports),
+        'zufluss_premium_eur': sum(r.get('audit', {}).get('zufluss_premium_eur', 0) for r in reports),
+        'zufluss_count': sum(r.get('audit', {}).get('zufluss_count', 0) for r in reports),
+        'zufluss_details': [],
+        'prior_zufluss_correction_eur': sum(r.get('audit', {}).get('prior_zufluss_correction_eur', 0) for r in reports),
+        'prior_zufluss_details': [],
     }
     for r in reports:
         a = r.get('audit', {})
         merged_audit['stillhalter_unmatched'].extend(a.get('stillhalter_unmatched', []))
         merged_audit['stillhalter_details'].extend(a.get('stillhalter_details', []))
         merged_audit['cross_year_put_corrections'].extend(a.get('cross_year_put_corrections', []))
+        merged_audit['zufluss_details'].extend(a.get('zufluss_details', []))
+        merged_audit['prior_zufluss_details'].extend(a.get('prior_zufluss_details', []))
         for year, val in a.get('cross_year_by_year', {}).items():
             merged_audit['cross_year_by_year'][year] = merged_audit['cross_year_by_year'].get(year, 0) + val
     merged['audit'] = merged_audit
@@ -680,7 +687,11 @@ audit = d.get('audit', {})
 cross_year_premium = audit.get('cross_year_premium_eur', 0)
 cross_year_by_year = audit.get('cross_year_by_year', {})
 cross_year_details = [det for det in audit.get('stillhalter_details', []) if det.get('is_cross_year')]
-has_cross_year = len(cross_year_details) > 0
+zufluss_details = audit.get('zufluss_details', [])
+zufluss_premium = audit.get('zufluss_premium_eur', 0)
+prior_zufluss_details = audit.get('prior_zufluss_details', [])
+prior_zufluss_correction = audit.get('prior_zufluss_correction_eur', 0)
+has_cross_year = len(cross_year_details) > 0 or len(zufluss_details) > 0 or len(prior_zufluss_details) > 0
 
 # ── Flex Query Hinweis ────────────────────────────────────────────────────────
 
@@ -709,18 +720,29 @@ if unmatched:
 
 zuflussprinzip_aktiv = False
 if has_cross_year:
+    zufluss_parts = []
+    if cross_year_details:
+        zufluss_parts.append(f"{len(cross_year_details)} Assignment-Prämie(n) aus Vorjahren ({fmt_de(cross_year_premium)} EUR)")
+    if zufluss_details:
+        zufluss_parts.append(f"{len(zufluss_details)} offene Stillhalter-Position(en) mit Zufluss im Steuerjahr ({fmt_de(zufluss_premium)} EUR, bereits in Berechnung enthalten)")
+    if prior_zufluss_details:
+        zufluss_parts.append(f"{len(prior_zufluss_details)} Vorjahres-Prämie(n) aus Glattstellungen korrigiert (-{fmt_de(prior_zufluss_correction)} EUR, bereits in Berechnung enthalten)")
     st.markdown(f"""
 <div style="background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
-    <strong style="color: #a855f7;">Zuflussprinzip (BMF Rn. 25, 33):</strong> {len(cross_year_details)} Stillhalterprämie(n) erkannt, deren Optionsverkauf in einem Vorjahr stattfand ({fmt_de(cross_year_premium)} EUR). Nach dem Zuflussprinzip gehören diese steuerlich in das Verkaufsjahr der Option.
+    <strong style="color: #a855f7;">Zuflussprinzip (BMF Rn. 25, 33):</strong> {"<br>".join(zufluss_parts)}
 </div>
 """, unsafe_allow_html=True)
-    zuflussprinzip_aktiv = st.checkbox(
-        "Zuflussprinzip anwenden (BMF Rn. 25, 33)",
-        value=False,
-        help="Verschiebt Stillhalterprämien aus Vorjahren aus dem aktuellen Steuerjahr heraus. "
-             "Diese Prämien gehören in die Steuererklärung des jeweiligen Vorjahres.")
+    if cross_year_details:
+        zuflussprinzip_aktiv = st.checkbox(
+            "Zuflussprinzip anwenden (BMF Rn. 25, 33)",
+            value=False,
+            help="Verschiebt Assignment-Prämien aus Vorjahren aus dem aktuellen Steuerjahr heraus. "
+                 "Diese Prämien gehören in die Steuererklärung des jeweiligen Vorjahres. "
+                 "Offene Stillhalter-Positionen und Vorjahres-Korrekturen sind bereits automatisch berechnet.")
 
 # Adjusted values for Zuflussprinzip
+# Note: zufluss_premium and prior_zufluss_correction are already applied in calculate_tax_report.py
+# The toggle only adjusts assignment cross-year premiums (existing behavior)
 adj_cross = cross_year_premium if zuflussprinzip_aktiv else 0
 adj_topf_2 = topf_2 - adj_cross
 adj_zeile_19 = zeile_19 - adj_cross
@@ -1110,7 +1132,9 @@ if csv_cats:
 
     ibkr_topf2_cats = ["Aktien- und Indexoptionen", "Futures", "Optionen auf Futures (Future-Style)",
                         "Optionen auf Futures", "Anleihen", "Treasury Bills"]
-    our_topf2_gain = d['options_gain_eur'] - d['audit'].get('stillhalter_premium_eur', 0) - d.get('fx_total_gain', 0) - no_invstg_gain
+    # Reverse Zufluss adjustments for IBKR comparison (IBKR doesn't know about Zufluss)
+    zufluss_adj = d['audit'].get('zufluss_premium_eur', 0) - d['audit'].get('prior_zufluss_correction_eur', 0)
+    our_topf2_gain = d['options_gain_eur'] - d['audit'].get('stillhalter_premium_eur', 0) - d.get('fx_total_gain', 0) - no_invstg_gain - zufluss_adj
     our_topf2_loss = d['options_loss_eur'] - d.get('fx_total_loss', 0) - no_invstg_loss
     ibkr_topf2_gain = sum(csv_cats.get(c, {}).get('gain', 0) for c in ibkr_topf2_cats)
     ibkr_topf2_loss = sum(csv_cats.get(c, {}).get('loss', 0) for c in ibkr_topf2_cats)
@@ -1165,9 +1189,20 @@ if csv_cats:
         st.info("Kleine Abweichungen sind normal (FX-Rundung, Steuerkorrekturen aus Vorjahren).")
     if has_etf_data and invstg_aktiv:
         st.caption("InvStG aktiv: ETF-Werte wurden für diesen Vergleich zurückaddiert, da der IBKR-Bericht keine InvStG-Trennung kennt.")
-    if tageskurs_aktiv:
-        corr_sign = "+" if fx_corr_total >= 0 else ""
-        st.caption(f"Tageskurs-Methode aktiv: Die FX-Korrektur ({corr_sign}{fmt_de(fx_corr_total)} EUR) ist im Plausibilitätscheck NICHT enthalten — er vergleicht immer gegen IBKRs Netto-Methode.")
+    if tageskurs_aktiv or zufluss_adj != 0:
+        notes = []
+        if tageskurs_aktiv:
+            corr_sign = "+" if fx_corr_total >= 0 else ""
+            notes.append(f"Tageskurs-Korrektur ({corr_sign}{fmt_de(fx_corr_total)} EUR)")
+        if zufluss_adj != 0:
+            notes.append(f"Stillhalter-Zufluss ({'+' if zufluss_adj >= 0 else ''}{fmt_de(zufluss_adj)} EUR)")
+        excluded = " und ".join(notes)
+        st.caption(
+            f"Der Plausibilitätscheck vergleicht unsere Berechnung 1:1 gegen IBKR's eigene Summen. "
+            f"Steuerliche Korrekturen, die über IBKR's Zahlen hinausgehen, werden dabei herausgerechnet: "
+            f"{excluded}. So lässt sich prüfen, ob die Basisdaten korrekt verarbeitet wurden, "
+            f"bevor die steuerlichen Anpassungen darauf aufsetzen."
+        )
 
 # ── Anlage KAP Zeilen ────────────────────────────────────────────────────────
 
@@ -1236,6 +1271,36 @@ if zuflussprinzip_aktiv and cross_year_details:
 
     st.info(f"**Gesamtbetrag Vorjahres-Prämien:** {fmt_de(cross_year_premium)} EUR — "
             f"um diesen Betrag wurde Zeile 19 im aktuellen Jahr reduziert.")
+
+# ── Stillhalter-Zufluss Details (offene Positionen + Vorjahres-Korrekturen) ──
+
+if zufluss_details or prior_zufluss_details:
+    section_title("Stillhalter-Zufluss · Offene Positionen & Korrekturen")
+    if zufluss_details:
+        st.markdown(f"""
+<div style="background: rgba(34,197,94,0.06); border: 1px solid rgba(34,197,94,0.2); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.82rem; color: #94a3b8;">
+    <strong style="color: #22c55e;">Stillhalter-Zufluss (§11 EStG):</strong> {len(zufluss_details)} Short-Option(en) im Steuerjahr verkauft, deren Position am Jahresende noch offen ist.
+    Die Prämien ({fmt_de(zufluss_premium)} EUR) sind als Zufluss im Steuerjahr steuerpflichtig und wurden zu Topf 2 addiert.
+</div>
+""", unsafe_allow_html=True)
+        zt = "| Symbol | Verkaufsdatum | Stk. | Prämie (EUR) |\n"
+        zt += "|--------|--------------|-----:|-------------:|\n"
+        for det in zufluss_details:
+            zt += f"| {det['symbol']} | {det['sell_date'][:10]} | {det['quantity']} | {fmt_de(det['premium_eur'])} |\n"
+        st.markdown(zt)
+
+    if prior_zufluss_details:
+        st.markdown(f"""
+<div style="background: rgba(168,85,247,0.06); border: 1px solid rgba(168,85,247,0.2); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.82rem; color: #94a3b8;">
+    <strong style="color: #a855f7;">Vorjahres-Korrektur:</strong> {len(prior_zufluss_details)} Position(en) wurden in einem Vorjahr als Stillhalter eröffnet und im Steuerjahr glattgestellt.
+    Die Prämien ({fmt_de(prior_zufluss_correction)} EUR) waren bereits im Verkaufsjahr steuerpflichtig und wurden vom aktuellen PnL abgezogen.
+</div>
+""", unsafe_allow_html=True)
+        pt = "| Symbol | Verkaufsjahr | Stk. | Korrektur (EUR) |\n"
+        pt += "|--------|:-----------:|-----:|----------------:|\n"
+        for det in prior_zufluss_details:
+            pt += f"| {det['symbol']} | {det['sell_year']} | {det['quantity']} | -{fmt_de(det['premium_eur'])} |\n"
+        st.markdown(pt)
 
 # ── Steuerliche Regeln & Berechnungsmethodik ─────────────────────────────────
 

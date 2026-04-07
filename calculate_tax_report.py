@@ -789,6 +789,219 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
               f"Ohne diesen kann die Stillhalterprämie nicht berechnet und von Topf 1 (Aktien) "
               f"nach Topf 2 (Sonstiges) verschoben werden. Vorjahres-XMLs per --history laden.")
 
+    # --- Stillhalter-Zufluss: SELL-to-open Prämien (§11 EStG, BMF Rn. 25) ---
+    # When a short option is SOLD to open, the premium is taxable income (Zufluss)
+    # in the year of sale — regardless of when the position is closed.
+    # IBKR shows fifoPnlRealized=0 for opening trades; the PnL only appears at close.
+    # We detect unclosed SELL-to-open positions and add their premiums as Zufluss income.
+    # Positions closed in the same year are already captured via fifoPnlRealized on the close.
+
+    zufluss_premium_eur = 0.0
+    zufluss_count = 0
+    zufluss_details = []
+
+    # All OPT SELL ExchTrade with PnL≈0 in tax_year (= opening short positions)
+    sell_opens = [t for t in trades
+                  if t.get('assetCategory') in ('OPT', 'FOP', 'FSFOP')
+                  and t.get('transactionType') == 'ExchTrade'
+                  and t.get('buySell') == 'SELL'
+                  and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01
+                  and (d := parse_date(t.get('reportDate') or t.get('dateTime') or t.get('tradeDate'))) is not None
+                  and d.year == tax_year]
+
+    # Group by instrument key to match sells against closes/assignments
+    from collections import defaultdict
+    instr_sells = defaultdict(list)   # {key: [sell_trades]}
+    instr_closes = defaultdict(int)   # {key: total_closed_qty}
+
+    for t in sell_opens:
+        key = (t.get('assetCategory'), t.get('strike'), t.get('expiry'), t.get('putCall'))
+        instr_sells[key].append(t)
+
+    # Count closing BUYs (Glattstellungen) and BookTrades (Assignments) in tax_year
+    for t in trades:
+        if t.get('assetCategory') not in ('OPT', 'FOP', 'FSFOP'):
+            continue
+        rd = parse_date(t.get('reportDate') or t.get('dateTime') or t.get('tradeDate'))
+        if not rd or rd.year != tax_year:
+            continue
+        key = (t.get('assetCategory'), t.get('strike'), t.get('expiry'), t.get('putCall'))
+        if key not in instr_sells:
+            continue
+        # Closing BUY (Glattstellung) — has PnL ≠ 0
+        if t.get('buySell') == 'BUY' and t.get('transactionType') == 'ExchTrade' and abs(safe_float(t.get('fifoPnlRealized'))) >= 0.01:
+            instr_closes[key] += abs(int(safe_float(t.get('quantity'))))
+        # BookTrade BUY (Assignment)
+        if t.get('buySell') == 'BUY' and t.get('transactionType') == 'BookTrade':
+            instr_closes[key] += abs(int(safe_float(t.get('quantity'))))
+
+    for key, sells in instr_sells.items():
+        total_sell_qty = sum(abs(int(safe_float(s.get('quantity')))) for s in sells)
+        closed_qty = instr_closes.get(key, 0)
+        unclosed_qty = max(0, total_sell_qty - closed_qty)
+
+        if unclosed_qty <= 0:
+            continue
+
+        # Weighted average premium across all SELL fills
+        total_premium_raw = 0.0
+        total_qty = 0
+        mult = int(safe_float(sells[0].get('multiplier'), 100))
+        fx_weighted = 0.0
+
+        for s in sells:
+            price = safe_float(s.get('tradePrice')) or safe_float(s.get('closePrice'))
+            qty = abs(int(safe_float(s.get('quantity'))))
+            fx = safe_float(s.get('fxRateToBase'), 1.0)
+            if qty > 0 and price > 0:
+                total_premium_raw += price * mult * qty
+                fx_weighted += fx * qty
+                total_qty += qty
+
+        if total_qty == 0 or total_premium_raw == 0:
+            continue
+
+        # Scale premium to unclosed quantity
+        premium_raw = total_premium_raw * unclosed_qty / total_qty
+        fx_to_base = fx_weighted / total_qty
+
+        if base_currency == 'EUR':
+            premium_eur = premium_raw * fx_to_base
+        else:
+            date = parse_date(sells[0].get('dateTime') or sells[0].get('tradeDate'))
+            rate_eur = get_rate_for_date(date, usd_to_eur_rates)
+            premium_eur = premium_raw * fx_to_base * rate_eur
+
+        zufluss_premium_eur += premium_eur
+        zufluss_count += 1
+
+        sell_date = None
+        for s in sells:
+            sd = parse_date(s.get('dateTime') or s.get('tradeDate'))
+            if sd and (sell_date is None or sd < sell_date):
+                sell_date = sd
+
+        symbol = sells[0].get('symbol') or sells[0].get('description') or f"{key[1]} {key[2]} {key[3]}"
+        zufluss_details.append({
+            'symbol': symbol,
+            'strike': key[1],
+            'expiry': key[2],
+            'putCall': key[3],
+            'quantity': unclosed_qty,
+            'premium_eur': premium_eur,
+            'sell_date': str(sell_date) if sell_date else '',
+            'sell_year': sell_date.year if sell_date else tax_year,
+            'type': 'sell_to_open',
+        })
+
+    if zufluss_premium_eur > 0:
+        options_gain += zufluss_premium_eur
+        add_topf2_detail('Stillhalterprämien', zufluss_premium_eur)
+        print(f"Stillhalter-Zufluss: {zufluss_count} offene Position(en), "
+              f"{zufluss_premium_eur:,.2f} EUR Prämien → Topf 2 (§11 EStG).")
+
+    # --- Vorjahres-Stillhalter-Korrektur (Zuflussprinzip) ---
+    # When --history XMLs are loaded, we find SELL-to-open from prior years that were
+    # closed in the current tax year. IBKR's fifoPnlRealized on the close includes the
+    # prior-year premium — but that premium was already taxable in the selling year.
+    # We subtract the premium to avoid double-counting.
+
+    prior_zufluss_correction_eur = 0.0
+    prior_zufluss_details = []
+
+    # Find prior-year SELL-to-open (PnL=0, year < tax_year)
+    prior_sell_opens = defaultdict(list)
+    for t in trades:
+        if t.get('assetCategory') not in ('OPT', 'FOP', 'FSFOP'):
+            continue
+        if t.get('transactionType') != 'ExchTrade' or t.get('buySell') != 'SELL':
+            continue
+        if abs(safe_float(t.get('fifoPnlRealized'))) >= 0.01:
+            continue
+        rd = parse_date(t.get('reportDate') or t.get('dateTime') or t.get('tradeDate'))
+        if not rd or rd.year >= tax_year:
+            continue
+        key = (t.get('assetCategory'), t.get('strike'), t.get('expiry'), t.get('putCall'))
+        prior_sell_opens[key].append(t)
+
+    if prior_sell_opens:
+        # Find matching current-year closes for these prior-year opens
+        for key, prior_sells in prior_sell_opens.items():
+            # Check if there's a closing BUY (Glattstellung) in tax_year
+            # EXCLUDE BookTrade BUYs (Assignments) — those are already handled
+            # by the assignment detection above and would cause double-counting
+            has_close = False
+            close_qty = 0
+            for t in trades:
+                if t.get('assetCategory') != key[0]:
+                    continue
+                if t.get('strike') != key[1] or t.get('expiry') != key[2] or t.get('putCall') != key[3]:
+                    continue
+                rd = parse_date(t.get('reportDate') or t.get('dateTime') or t.get('tradeDate'))
+                if not rd or rd.year != tax_year:
+                    continue
+                # Only ExchTrade BUY (Glattstellung), NOT BookTrade (Assignment)
+                if t.get('buySell') == 'BUY' and t.get('transactionType') == 'ExchTrade' and abs(safe_float(t.get('fifoPnlRealized'))) >= 0.01:
+                    close_qty += abs(int(safe_float(t.get('quantity'))))
+                    has_close = True
+
+            if not has_close:
+                continue
+
+            # Calculate the prior-year premium for the closed quantity
+            total_premium_raw = 0.0
+            total_qty = 0
+            mult = int(safe_float(prior_sells[0].get('multiplier'), 100))
+            fx_weighted = 0.0
+            sell_date = None
+
+            for s in prior_sells:
+                price = safe_float(s.get('tradePrice')) or safe_float(s.get('closePrice'))
+                qty = abs(int(safe_float(s.get('quantity'))))
+                fx = safe_float(s.get('fxRateToBase'), 1.0)
+                if qty > 0 and price > 0:
+                    total_premium_raw += price * mult * qty
+                    fx_weighted += fx * qty
+                    total_qty += qty
+                sd = parse_date(s.get('dateTime') or s.get('tradeDate'))
+                if sd and (sell_date is None or sd < sell_date):
+                    sell_date = sd
+
+            if total_qty == 0 or total_premium_raw == 0:
+                continue
+
+            matched_qty = min(close_qty, total_qty)
+            premium_raw = total_premium_raw * matched_qty / total_qty
+            fx_to_base = fx_weighted / total_qty
+
+            if base_currency == 'EUR':
+                correction_eur = premium_raw * fx_to_base
+            else:
+                date = parse_date(prior_sells[0].get('dateTime') or prior_sells[0].get('tradeDate'))
+                rate_eur = get_rate_for_date(date, usd_to_eur_rates)
+                correction_eur = premium_raw * fx_to_base * rate_eur
+
+            prior_zufluss_correction_eur += correction_eur
+            symbol = prior_sells[0].get('symbol') or prior_sells[0].get('description') or f"{key[1]} {key[2]} {key[3]}"
+            prior_zufluss_details.append({
+                'symbol': symbol,
+                'strike': key[1],
+                'expiry': key[2],
+                'putCall': key[3],
+                'quantity': matched_qty,
+                'premium_eur': correction_eur,
+                'sell_date': str(sell_date) if sell_date else '',
+                'sell_year': sell_date.year if sell_date else tax_year - 1,
+                'type': 'prior_year_correction',
+            })
+
+    if prior_zufluss_correction_eur > 0:
+        # Subtract prior-year premium from current PnL (already taxed in prior year)
+        options_gain -= prior_zufluss_correction_eur
+        add_topf2_detail('Stillhalterprämien', -prior_zufluss_correction_eur)
+        print(f"Vorjahres-Stillhalter-Korrektur: {len(prior_zufluss_details)} Position(en), "
+              f"-{prior_zufluss_correction_eur:,.2f} EUR (Prämie bereits im Verkaufsjahr versteuert).")
+
     # --- Cross-Year Put-Assignment Korrektur (BMF Rn. 33) ---
     # When a put was assigned in a PRIOR year, the stock was acquired at Strike.
     # IBKR reduced the cost basis by the premium (Strike - Premium).
@@ -940,12 +1153,21 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                   f"{cross_year_put_total:,.2f} EUR von PnL abgezogen (Prämie bereits in Vorjahr versteuert).")
 
     # Zuflussprinzip: cross-year premium aggregation
+    # Combines three sources:
+    # 1. Assignment in current year, SELL in prior year → subtract from current (existing)
+    # 2. SELL-to-open unclosed in current year → add to current (zufluss_premium_eur, already applied above)
+    # 3. Prior-year SELL closed in current year → subtract from current (prior_zufluss_correction_eur, already applied above)
     cross_year_premium_eur = sum(d['premium_eur'] for d in stillhalter_details if d['is_cross_year'])
     cross_year_by_year = {}
     for det in stillhalter_details:
         if det['is_cross_year']:
             yr = det['orig_sell_year']
             cross_year_by_year[yr] = cross_year_by_year.get(yr, 0) + det['premium_eur']
+    # Add prior-year SELL-to-open corrections to cross_year tracking
+    for det in prior_zufluss_details:
+        yr = det['sell_year']
+        cross_year_by_year[yr] = cross_year_by_year.get(yr, 0) + det['premium_eur']
+        cross_year_premium_eur += det['premium_eur']
 
     # --- PLAUSIBILITY: Raw Sums for Reconciliation ---
     # Use reportDate (booking date) for year assignment — Zuflussprinzip (§11 EStG)
@@ -1509,7 +1731,12 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             "cross_year_put_corrections": cross_year_put_corrections,
             "cross_year_put_total": cross_year_put_total,
             "no_invstg_gain": no_invstg_gain,
-            "no_invstg_loss": no_invstg_loss
+            "no_invstg_loss": no_invstg_loss,
+            "zufluss_premium_eur": zufluss_premium_eur,
+            "zufluss_count": zufluss_count,
+            "zufluss_details": zufluss_details,
+            "prior_zufluss_correction_eur": prior_zufluss_correction_eur,
+            "prior_zufluss_details": prior_zufluss_details,
         }
     }
 
