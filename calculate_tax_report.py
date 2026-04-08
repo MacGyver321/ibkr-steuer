@@ -1377,8 +1377,11 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     add_topf2_detail(TOPF2_CAT_LABELS.get(asset, asset), diff_eur)
                     added_from_summary += 1
             else:
-                # For STK and OPT: skip if trades.csv already has non-zero PnL
-                if abs(trade_pnl) > 0.01:
+                # For STK and OPT: skip if ISIN appears in trades.csv at all
+                # (even with PnL=0, e.g. assignment BookTrades — those are correctly
+                # handled by the main trades loop; using pnl_summary here would
+                # double-count or add phantom gains/losses)
+                if isin in pnl_by_isin:
                     continue
                     
                 gain_eur = summary_gain_usd * default_fallback_rate
