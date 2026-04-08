@@ -605,7 +605,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         isin = t.get('isin', '').strip()
         if category == 'STK' and sub == 'ETF' and isin:
             cls = get_classification(isin)
-            topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf2'
+            topf = 'KAP-INV' if cls != 'no_invstg' else 'Topf2'
         elif category == 'STK':
             topf = 'Topf1'
         else:
@@ -762,7 +762,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             underlying_isin = symbol_to_isin.get(underlying, '')
             if underlying_isin and underlying_isin in etf_isins:
                 cls = get_classification(underlying_isin)
-                if cls and cls != 'no_invstg':
+                if cls != 'no_invstg':
                     etf_premium += det['premium_eur']
                     # Adjust per-ISIN tracking (keeps etf_by_isin in sync with etf_invstg_gain)
                     # Both must be adjusted: etf_invstg_gain for total, etf_by_isin for per-ISIN TFS
@@ -1173,7 +1173,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 underlying_isin = symbol_to_isin.get(sym, '')
                 if underlying_isin and underlying_isin in etf_isins:
                     cls = get_classification(underlying_isin)
-                    if cls and cls != 'no_invstg':
+                    if cls != 'no_invstg':
                         etf_corr += c['correction_eur']
                         # Adjust per-ISIN (keeps in sync with etf_invstg_gain)
                         if underlying_isin in etf_by_isin:
@@ -1264,7 +1264,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             fund_isin = f.get('isin', '').strip()
             if fund_isin:
                 cls = get_classification(fund_isin)
-                if cls and cls != 'no_invstg':
+                if cls != 'no_invstg':
                     is_etf_fund = True
 
         if code == 'DIV':
@@ -1388,7 +1388,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     sub_cat = s_row.get('subCategory', '')
                     if sub_cat == 'ETF':
                         cls = get_classification(isin)
-                        if cls and cls != 'no_invstg':
+                        if cls != 'no_invstg':
                             etf_invstg_gain += gain_eur
                             etf_invstg_loss += loss_eur
                             if isin not in etf_by_isin:
@@ -1634,7 +1634,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             isin = lot.get('isin', '').strip()
             if category == 'STK' and sub == 'ETF' and isin:
                 cls = get_classification(isin)
-                topf = 'KAP-INV' if cls and cls != 'no_invstg' else 'Topf2'
+                topf = 'KAP-INV' if cls != 'no_invstg' else 'Topf2'
             elif category == 'STK':
                 topf = 'Topf1'
             else:
