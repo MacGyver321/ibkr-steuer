@@ -394,6 +394,11 @@ def merge_report_data(reports):
                 merged_dict[k] = merged_dict.get(k, 0) + v
         merged[dict_field] = merged_dict
 
+    # FX correction details (list concat)
+    merged['fx_correction_details'] = []
+    for r in reports:
+        merged['fx_correction_details'].extend(r.get('fx_correction_details', []))
+
     # csv_category_totals (nested dict)
     merged_csv = {}
     for r in reports:
@@ -1233,129 +1238,185 @@ if has_so_data:
 
 
 # ── Einzelnachweise - Trade-Level-Reporting ──────────────────────────────────
-trade_details = d.get('trade_details', [])
+trade_details = list(d.get('trade_details', []))
+if trade_details and tageskurs_aktiv:
+    for lot in d.get('fx_correction_details', []):
+        if abs(lot.get('delta_eur', 0)) < 0.005:
+            continue
+        underlying = (lot.get('underlyingSymbol', '') or lot.get('symbol', '') or '').split()[0]
+        open_dt = (lot.get('openDateTime', '') or '')[:10]
+        close_dt = lot.get('reportDate', '')
+        trade_details.append({
+            'dateTime': close_dt, 'reportDate': close_dt,
+            'symbol': lot.get('symbol', ''),
+            'description': f'Tageskurs-Korrektur (Kauf {open_dt}, Kurs {lot["fx_open"]:.4f} -> {lot["fx_close"]:.4f})',
+            'isin': lot.get('isin', ''), 'assetCategory': lot.get('assetCategory', ''),
+            'subCategory': lot.get('subCategory', ''), 'buySell': '', 'openClose': '',
+            'quantity': lot.get('quantity', ''), 'transactionType': 'FX-Korrektur',
+            'currency': lot.get('currency', ''), 'tradePrice': 0, 'cost': lot.get('cost', 0),
+            'proceeds': 0, 'fifoPnlRealized': 0, 'fxRateToBase': 0,
+            'pnl_eur': lot['delta_eur'], 'topf': lot.get('topf', 'Topf2'),
+            'strike': '', 'expiry': '', 'putCall': '', 'multiplier': '',
+            'underlyingSymbol': underlying, 'source': 'tageskurs_korrektur',
+        })
+    trade_details.sort(key=lambda r: r.get('dateTime', '') or r.get('reportDate', '') or 'zzzz')
 if trade_details:
-    section_title("Einzelnachweise - Trade-Details (CSV)")
-
-    def format_instrument_csv(row):
-        sym = row.get('symbol', '') or ''
-        desc = row.get('description', '') or ''
-        pc = row.get('putCall', '') or ''
-        strike = row.get('strike', '') or ''
-        expiry = row.get('expiry', '') or ''
-        if pc and strike and expiry:
-            pc_label = 'Call' if pc == 'C' else 'Put'
-            if len(expiry) == 8:
-                exp_fmt = f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:]}"
-            else:
-                exp_fmt = expiry[:10]
-            return f"{sym} ({pc_label} {strike} exp. {exp_fmt})"
-        if desc and sym:
-            return f"{sym} ({desc})"
-        return sym or desc or ''
-
-    topf_readable = {
-        'Topf1': 'Topf 1 (Aktien)',
-        'Topf2': 'Topf 2 (Sonstiges)',
-        'KAP-INV': 'Anlage KAP-INV (InvStG)',
-        'Anlage SO': 'Anlage SO (Paragraf 23 EStG)',
-    }
+    section_title('Einzelnachweise - Trade-Details (Excel)')
+    st.markdown('<div style="margin-top:-18px;margin-bottom:12px"><span style="background:linear-gradient(135deg,#f59e0b,#ef4444);color:#fff;padding:5px 16px;border-radius:6px;font-size:0.85em;font-weight:700;letter-spacing:1px;box-shadow:0 2px 8px rgba(239,68,68,0.3)">NEUE FUNKTION &middot; BETA</span></div>', unsafe_allow_html=True)
 
     from collections import defaultdict
-    trades_by_topf = defaultdict(list)
-    for row in trade_details:
-        trades_by_topf[row.get('topf', 'Topf2')].append(row)
-
-    # Kurzuebersicht im UI
-    summary_parts = []
-    for topf_key in ['Topf1', 'Topf2', 'KAP-INV', 'Anlage SO']:
-        rows = trades_by_topf.get(topf_key, [])
-        if rows:
-            s = sum(r.get('pnl_eur', 0) for r in rows)
-            label = topf_readable.get(topf_key, topf_key)
-            summary_parts.append(f"**{label}:** {len(rows)} Trades, {fmt_de(s)} EUR")
-
-    st.markdown(" · ".join(summary_parts))
-
-    # CSV bauen -- detailliert
-    import csv as csv_mod
-    import io
-    csv_buffer = io.StringIO()
-    fieldnames = [
-        'Verrechnungstopf', 'Datum', 'Handelsdatum',
-        'Wertpapier', 'Beschreibung', 'ISIN', 'Kategorie',
-        'Kauf/Verkauf', 'Stueck', 'Kurs',
-        'Kostenbasis (Orig.)', 'Erloese (Orig.)', 'G/V (Orig.)', 'Waehrung',
-        'Wechselkurs', 'G/V (EUR)',
-        'Transaktionstyp', 'Multiplikator', 'Quelle', 'Anmerkung',
-    ]
-    writer = csv_mod.DictWriter(csv_buffer, fieldnames=fieldnames, delimiter=';')
-    writer.writeheader()
-
+    topf_readable = {
+        'Topf1': 'Topf 1 - Aktien', 'Topf2': 'Topf 2 - Sonstiges',
+        'KAP-INV': 'Anlage KAP-INV (InvStG)', 'Anlage SO': 'Anlage SO',
+    }
     cat_labels = {
         'STK': 'Aktie', 'OPT': 'Option', 'FUT': 'Future',
         'FOP': 'Futures-Option', 'FSFOP': 'Flex-Option',
         'BILL': 'T-Bill', 'BOND': 'Anleihe',
     }
-
+    trades_by_topf = defaultdict(list)
     for row in trade_details:
-        source = row.get('source', '')
-        anmerkung = ''
-        if source == 'pnl_summary':
-            anmerkung = 'Aus IBKR PnL-Summary (kein Einzeltrade)'
-        elif source == 'stillhalter_korrektur':
-            anmerkung = row.get('description', 'Stillhalter-Korrektur')
+        trades_by_topf[row.get('topf', 'Topf2')].append(row)
 
-        pnl_orig = row.get('fifoPnlRealized', 0)
-        fx = row.get('fxRateToBase', 0)
-        cost = row.get('cost', 0)
-        proceeds = row.get('proceeds', 0)
-        price = row.get('tradePrice', 0)
-        mult = row.get('multiplier', '')
-
-        writer.writerow({
-            'Verrechnungstopf': topf_readable.get(row.get('topf', ''), row.get('topf', '')),
-            'Datum': (row.get('reportDate', '') or '')[:10],
-            'Handelsdatum': (row.get('dateTime', '') or '')[:10],
-            'Wertpapier': format_instrument_csv(row),
-            'Beschreibung': row.get('description', ''),
-            'ISIN': row.get('isin', ''),
-            'Kategorie': cat_labels.get(row.get('assetCategory', ''), row.get('assetCategory', '')),
-            'Kauf/Verkauf': row.get('buySell', ''),
-            'Stueck': row.get('quantity', ''),
-            'Kurs': f"{price:.4f}" if price else '',
-            'Kostenbasis (Orig.)': f"{cost:.2f}" if cost else '',
-            'Erloese (Orig.)': f"{proceeds:.2f}" if proceeds else '',
-            'G/V (Orig.)': f"{pnl_orig:.2f}" if pnl_orig else '',
-            'Waehrung': row.get('currency', ''),
-            'Wechselkurs': f"{fx:.4f}" if fx else '',
-            'G/V (EUR)': f"{row.get('pnl_eur', 0):.2f}",
-            'Transaktionstyp': row.get('transactionType', ''),
-            'Multiplikator': mult if mult and str(mult) != '1' else '',
-            'Quelle': source,
-            'Anmerkung': anmerkung,
-        })
-
-    # Summenzeilen pro Topf am Ende
-    writer.writerow({f: '' for f in fieldnames})
-    writer.writerow({'Verrechnungstopf': '--- SUMMEN ---', **{f: '' for f in fieldnames if f != 'Verrechnungstopf'}})
+    n_trades = sum(1 for r in trade_details if r.get('source') == 'trades')
+    n_korr = len(trade_details) - n_trades
+    n_underlyings = len(set(
+        (r.get('underlyingSymbol', '') or r.get('symbol', '') or '?').split()[0]
+        for r in trade_details if r.get('source') == 'trades'
+    ))
+    header = f"**{n_trades} Trades, {n_underlyings} Wertpapiere"
+    if n_korr > 0: header += f" (+ {n_korr} Korrekturen/Zufluesse)"
+    header += "**"
+    summary_lines = [header]
     for topf_key in ['Topf1', 'Topf2', 'KAP-INV', 'Anlage SO']:
         rows = trades_by_topf.get(topf_key, [])
         if rows:
             s = sum(r.get('pnl_eur', 0) for r in rows)
-            writer.writerow({
-                'Verrechnungstopf': topf_readable.get(topf_key, topf_key),
-                'Stueck': str(len(rows)),
-                'G/V (EUR)': f"{s:.2f}",
-                'Anmerkung': f"{len(rows)} Positionen",
-                **{f: '' for f in fieldnames if f not in ('Verrechnungstopf', 'Stueck', 'G/V (EUR)', 'Anmerkung')},
-            })
+            summary_lines.append(f"{topf_readable.get(topf_key, topf_key).split(' - ')[0]}: {fmt_de(s)} EUR")
+    st.markdown(" | ".join(summary_lines))
+    st.caption("Enthaelt Trades, Optionsverlaeufe, Stillhalter-Korrekturen und Zufluesse. Dividenden, Zinsen und Quellensteuer sind nicht enthalten.")
 
+    def _format_instrument(row):
+        sym = row.get('symbol', '') or ''; desc = row.get('description', '') or ''
+        pc = row.get('putCall', '') or ''; strike = row.get('strike', '') or ''; expiry = row.get('expiry', '') or ''
+        if pc and strike and expiry:
+            pc_label = 'Call' if pc == 'C' else 'Put'
+            exp_fmt = f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:]}" if len(expiry) == 8 else expiry[:10]
+            return f"{sym} ({pc_label} {strike} exp. {exp_fmt})"
+        if desc and sym: return f"{sym} ({desc})"
+        return sym or desc or ''
+
+    def _get_group_key(row):
+        us = (row.get('underlyingSymbol', '') or '').strip()
+        if us: return us.split()[0]
+        sym = (row.get('symbol', '') or '').strip()
+        return sym.split()[0] if sym else '?'
+
+    def _build_excel(trade_details, trades_by_topf):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        import io
+        wb = Workbook(); ws = wb.active; ws.title = f"Trade-Details {steuerjahr}"
+        hdr_font = Font(bold=True, color="FFFFFF", size=11); hdr_fill = PatternFill("solid", fgColor="1e3a5f")
+        grp_font = Font(bold=True, size=10); grp_fill = PatternFill("solid", fgColor="d6e4f0")
+        gain_font = Font(color="006100", size=9); gain_fill = PatternFill("solid", fgColor="e2efda")
+        loss_font = Font(color="9c0006", size=9); loss_fill = PatternFill("solid", fgColor="fce4ec")
+        korr_font = Font(italic=True, size=9); korr_fill = PatternFill("solid", fgColor="fff9c4")
+        sub_font = Font(bold=True, size=9); sub_fill = PatternFill("solid", fgColor="f2f2f2")
+        total_font = Font(bold=True, size=10, color="FFFFFF"); total_fill = PatternFill("solid", fgColor="4a4a4a")
+        normal_font = Font(size=9); thin_border = Border(bottom=Side(style='thin', color='cccccc'))
+        num_fmt_eur = '#.##0,00'; num_fmt_4d = '#.##0,0000'
+        cols = ['Datum', 'Handelsdatum', 'Wertpapier', 'ISIN', 'Kategorie',
+                'K/V', 'Stk.', 'Kurs', 'Kostenbasis', 'Erloese',
+                'G/V (Orig.)', 'Waehrung', 'Wechselkurs', 'G/V (EUR)', 'Anmerkung']
+        col_widths = [12, 12, 42, 15, 10, 6, 8, 11, 13, 13, 13, 6, 11, 14, 40]
+        eur_col = 14
+        for i, w in enumerate(col_widths, 1): ws.column_dimensions[get_column_letter(i)].width = w
+        row_num = 1
+        for topf_key in ['Topf1', 'Topf2', 'KAP-INV', 'Anlage SO']:
+            topf_rows = trades_by_topf.get(topf_key, [])
+            if not topf_rows: continue
+            ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=len(cols))
+            cell = ws.cell(row=row_num, column=1, value=topf_readable.get(topf_key, topf_key))
+            cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = Alignment(horizontal='left')
+            row_num += 1
+            for ci, cn in enumerate(cols, 1):
+                cell = ws.cell(row=row_num, column=ci, value=cn)
+                cell.font = Font(bold=True, size=9); cell.fill = PatternFill("solid", fgColor="e8e8e8"); cell.border = thin_border
+            row_num += 1
+            groups = defaultdict(list)
+            for r in topf_rows: groups[_get_group_key(r)].append(r)
+            topf_total = 0.0
+            for grp_key in sorted(groups.keys()):
+                grp_rows = groups[grp_key]
+                grp_rows.sort(key=lambda r: r.get('dateTime', '') or r.get('reportDate', '') or '')
+                grp_desc = ''; grp_isin = ''
+                for r in grp_rows:
+                    if r.get('description') and r.get('source') != 'stillhalter_korrektur': grp_desc = r['description']
+                    if r.get('isin'): grp_isin = r['isin']
+                    if grp_desc and grp_isin: break
+                grp_label = grp_key
+                if grp_desc: grp_label += f" - {grp_desc}"
+                if grp_isin: grp_label += f" ({grp_isin})"
+                ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=len(cols))
+                cell = ws.cell(row=row_num, column=1, value=grp_label); cell.font = grp_font; cell.fill = grp_fill
+                row_num += 1; grp_total = 0.0
+                for r in grp_rows:
+                    source = r.get('source', ''); pnl_eur = r.get('pnl_eur', 0)
+                    pnl_orig = r.get('fifoPnlRealized', 0); fx = r.get('fxRateToBase', 0)
+                    cost = r.get('cost', 0); proceeds = r.get('proceeds', 0); price = r.get('tradePrice', 0)
+                    anmerkung = ''
+                    if source == 'pnl_summary': anmerkung = 'Aus IBKR PnL-Summary'
+                    elif source == 'stillhalter_korrektur': anmerkung = r.get('description', 'Korrektur')
+                    elif source == 'zufluss': anmerkung = r.get('description', 'Zufluss')
+                    elif source == 'zufluss_korrektur': anmerkung = r.get('description', 'Vorjahres-Korrektur')
+                    elif source == 'tageskurs_korrektur': anmerkung = r.get('description', 'Tageskurs')
+                    bs = r.get('buySell', ''); oc = r.get('openClose', '')
+                    if bs == 'SELL' and oc == 'O': bs_label = 'STO'
+                    elif bs == 'BUY' and oc == 'C': bs_label = 'BTC'
+                    elif bs == 'BUY' and oc == 'O': bs_label = 'BTO'
+                    elif bs == 'SELL' and oc == 'C': bs_label = 'STC'
+                    else: bs_label = bs
+                    values = [
+                        (r.get('reportDate', '') or '')[:10], (r.get('dateTime', '') or '')[:10],
+                        _format_instrument(r), r.get('isin', ''),
+                        cat_labels.get(r.get('assetCategory', ''), r.get('assetCategory', '')),
+                        bs_label, r.get('quantity', ''),
+                        price if price else None, cost if cost else None, proceeds if proceeds else None,
+                        pnl_orig if pnl_orig else None, r.get('currency', ''),
+                        fx if fx else None, pnl_eur, anmerkung,
+                    ]
+                    for ci, val in enumerate(values, 1):
+                        cell = ws.cell(row=row_num, column=ci, value=val); cell.font = normal_font
+                        if ci in (8, 9, 10, 11, 14) and isinstance(val, (int, float)): cell.number_format = num_fmt_eur
+                        elif ci == 13 and isinstance(val, (int, float)): cell.number_format = num_fmt_4d
+                    if source in ('stillhalter_korrektur', 'zufluss', 'zufluss_korrektur', 'tageskurs_korrektur'):
+                        for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = korr_fill; ws.cell(row=row_num, column=ci).font = korr_font
+                    elif pnl_eur > 0.005:
+                        for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = gain_fill; ws.cell(row=row_num, column=ci).font = gain_font
+                    elif pnl_eur < -0.005:
+                        for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = loss_fill; ws.cell(row=row_num, column=ci).font = loss_font
+                    grp_total += pnl_eur; row_num += 1
+                ws.cell(row=row_num, column=1, value=f"Zwischensumme {grp_key}")
+                for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).font = sub_font; ws.cell(row=row_num, column=ci).fill = sub_fill; ws.cell(row=row_num, column=ci).border = thin_border
+                cell = ws.cell(row=row_num, column=eur_col, value=grp_total); cell.number_format = num_fmt_eur; cell.font = sub_font; cell.fill = sub_fill
+                topf_total += grp_total; row_num += 1
+            topf_label = topf_readable.get(topf_key, topf_key).split(' - ')[0]
+            ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=eur_col - 1)
+            cell = ws.cell(row=row_num, column=1, value=f"SUMME {topf_label}"); cell.font = total_font; cell.fill = total_fill; cell.alignment = Alignment(horizontal='right')
+            for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = total_fill
+            cell = ws.cell(row=row_num, column=eur_col, value=topf_total); cell.number_format = num_fmt_eur; cell.font = total_font; cell.fill = total_fill
+            row_num += 2
+        ws.freeze_panes = 'A2'
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    xlsx_data = _build_excel(trade_details, trades_by_topf)
     st.download_button(
-        label=f"Trade-Details als CSV herunterladen ({len(trade_details)} Positionen)",
-        data=csv_buffer.getvalue(),
-        file_name=f"trade_details_{steuerjahr}.csv",
-        mime="text/csv",
+        label=f"Trade-Details als Excel herunterladen ({len(trade_details)} Positionen)",
+        data=xlsx_data,
+        file_name=f"trade_details_{steuerjahr}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
 

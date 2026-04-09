@@ -12,6 +12,7 @@
     <script type="module">
         import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@0.85.1/build/stlite.js";
         mount({
+            requirements: ["openpyxl"],
             entrypoint: "app.py",
             files: {
                 "app.py": { url: "./app.py" },
