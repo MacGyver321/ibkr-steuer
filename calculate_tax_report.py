@@ -653,6 +653,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             'proceeds': safe_float(t.get('proceeds'), 0),
             'fifoPnlRealized': pnl_raw,
             'fxRateToBase': fx_to_base,
+            'ibCommission': safe_float(t.get('ibCommission'), 0),
             'pnl_eur': round(pnl_eur, 2),
             'topf': topf,
             'strike': t.get('strike', ''),

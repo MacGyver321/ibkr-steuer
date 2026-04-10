@@ -1373,9 +1373,9 @@ if trade_details:
 
         cols = ['Datum', 'Handelsdatum', 'Wertpapier', 'ISIN', 'Kategorie',
                 'K/V', 'Stk.', 'Kurs', 'Kostenbasis', 'Erlöse',
-                'G/V (Orig.)', 'Währung', 'Wechselkurs', 'G/V (EUR)', 'Anmerkung']
-        col_widths = [12, 12, 42, 15, 10, 6, 8, 11, 13, 13, 13, 6, 11, 14, 40]
-        eur_col = 14  # 1-based: column N = G/V (EUR)
+                'G/V (Orig.)', 'Kommission', 'Währung', 'Wechselkurs', 'G/V (EUR)', 'Anmerkung']
+        col_widths = [12, 12, 42, 15, 10, 6, 8, 11, 13, 13, 13, 11, 6, 11, 14, 40]
+        eur_col = 15  # 1-based: column O = G/V (EUR)
 
         for i, w in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = w
@@ -1437,6 +1437,11 @@ if trade_details:
                 cell.fill = grp_fill
                 row_num += 1
 
+                grp_has_stillhalter = any(
+                    r.get('source') in ('stillhalter_korrektur', 'cross_year_put_korrektur')
+                    for r in grp_rows
+                )
+
                 grp_total = 0.0
                 for r in grp_rows:
                     source = r.get('source', '')
@@ -1461,6 +1466,8 @@ if trade_details:
                         anmerkung = r.get('description', 'Tageskurs §20 Abs. 4')
                     elif source == 'cross_year_put_korrektur':
                         anmerkung = r.get('description', 'Cross-Year Put-Korrektur')
+                    elif source == 'trades' and grp_has_stillhalter and r.get('assetCategory') == 'STK':
+                        anmerkung = 'Kostenbasis enthält Stillhalterprämie (s. Korrekturzeile)'
 
                     # Readable open/close label
                     bs = r.get('buySell', '')
@@ -1476,6 +1483,8 @@ if trade_details:
                     else:
                         bs_label = bs
 
+                    commission = r.get('ibCommission', 0) or 0
+
                     values = [
                         (r.get('reportDate', '') or '')[:10],
                         (r.get('dateTime', '') or '')[:10],
@@ -1488,6 +1497,7 @@ if trade_details:
                         cost if cost else None,
                         proceeds if proceeds else None,
                         pnl_orig if pnl_orig else None,
+                        commission if commission else None,
                         r.get('currency', ''),
                         fx if fx else None,
                         pnl_eur,
@@ -1498,9 +1508,9 @@ if trade_details:
                         cell = ws.cell(row=row_num, column=ci, value=val)
                         cell.font = normal_font
                         # Number formats
-                        if ci in (8, 9, 10, 11, 14) and isinstance(val, (int, float)):
+                        if ci in (8, 9, 10, 11, 12, 15) and isinstance(val, (int, float)):
                             cell.number_format = num_fmt_eur
-                        elif ci == 13 and isinstance(val, (int, float)):
+                        elif ci == 14 and isinstance(val, (int, float)):
                             cell.number_format = num_fmt_4d
 
                     # Row coloring

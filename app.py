@@ -1329,9 +1329,9 @@ if trade_details:
         num_fmt_eur = '#.##0,00'; num_fmt_4d = '#.##0,0000'
         cols = ['Datum', 'Handelsdatum', 'Wertpapier', 'ISIN', 'Kategorie',
                 'K/V', 'Stk.', 'Kurs', 'Kostenbasis', 'Erloese',
-                'G/V (Orig.)', 'Waehrung', 'Wechselkurs', 'G/V (EUR)', 'Anmerkung']
-        col_widths = [12, 12, 42, 15, 10, 6, 8, 11, 13, 13, 13, 6, 11, 14, 40]
-        eur_col = 14
+                'G/V (Orig.)', 'Kommission', 'Waehrung', 'Wechselkurs', 'G/V (EUR)', 'Anmerkung']
+        col_widths = [12, 12, 42, 15, 10, 6, 8, 11, 13, 13, 13, 11, 6, 11, 14, 40]
+        eur_col = 15
         for i, w in enumerate(col_widths, 1): ws.column_dimensions[get_column_letter(i)].width = w
         row_num = 1
         for topf_key in ['Topf1', 'Topf2', 'KAP-INV', 'Anlage SO']:
@@ -1362,10 +1362,12 @@ if trade_details:
                 ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=len(cols))
                 cell = ws.cell(row=row_num, column=1, value=grp_label); cell.font = grp_font; cell.fill = grp_fill
                 row_num += 1; grp_total = 0.0
+                grp_has_stillhalter = any(r.get('source') in ('stillhalter_korrektur', 'cross_year_put_korrektur') for r in grp_rows)
                 for r in grp_rows:
                     source = r.get('source', ''); pnl_eur = r.get('pnl_eur', 0)
                     pnl_orig = r.get('fifoPnlRealized', 0); fx = r.get('fxRateToBase', 0)
                     cost = r.get('cost', 0); proceeds = r.get('proceeds', 0); price = r.get('tradePrice', 0)
+                    commission = r.get('ibCommission', 0) or 0
                     anmerkung = ''
                     if source == 'pnl_summary': anmerkung = 'Aus IBKR PnL-Summary'
                     elif source == 'stillhalter_korrektur': anmerkung = r.get('description', 'Korrektur')
@@ -1373,6 +1375,8 @@ if trade_details:
                     elif source == 'zufluss_korrektur': anmerkung = r.get('description', 'Vorjahres-Korrektur')
                     elif source == 'tageskurs_korrektur': anmerkung = r.get('description', 'Tageskurs')
                     elif source == 'cross_year_put_korrektur': anmerkung = r.get('description', 'Cross-Year Put-Korrektur')
+                    elif source == 'trades' and grp_has_stillhalter and r.get('assetCategory') == 'STK':
+                        anmerkung = 'Kostenbasis enthaelt Stillhalterpraemie (s. Korrekturzeile)'
                     bs = r.get('buySell', ''); oc = r.get('openClose', '')
                     if bs == 'SELL' and oc == 'O': bs_label = 'STO'
                     elif bs == 'BUY' and oc == 'C': bs_label = 'BTC'
@@ -1385,13 +1389,13 @@ if trade_details:
                         cat_labels.get(r.get('assetCategory', ''), r.get('assetCategory', '')),
                         bs_label, r.get('quantity', ''),
                         price if price else None, cost if cost else None, proceeds if proceeds else None,
-                        pnl_orig if pnl_orig else None, r.get('currency', ''),
+                        pnl_orig if pnl_orig else None, commission if commission else None, r.get('currency', ''),
                         fx if fx else None, pnl_eur, anmerkung,
                     ]
                     for ci, val in enumerate(values, 1):
                         cell = ws.cell(row=row_num, column=ci, value=val); cell.font = normal_font
-                        if ci in (8, 9, 10, 11, 14) and isinstance(val, (int, float)): cell.number_format = num_fmt_eur
-                        elif ci == 13 and isinstance(val, (int, float)): cell.number_format = num_fmt_4d
+                        if ci in (8, 9, 10, 11, 12, 15) and isinstance(val, (int, float)): cell.number_format = num_fmt_eur
+                        elif ci == 14 and isinstance(val, (int, float)): cell.number_format = num_fmt_4d
                     if source in ('stillhalter_korrektur', 'zufluss', 'zufluss_korrektur', 'tageskurs_korrektur', 'cross_year_put_korrektur'):
                         for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = korr_fill; ws.cell(row=row_num, column=ci).font = korr_font
                     elif pnl_eur > 0.005:
