@@ -1811,15 +1811,28 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         closed_lots = load_csv(closed_lots_path)
 
         if base_currency == 'EUR':
-            # EUR base: fxRateToBase on USD trades IS the USD→EUR rate directly
-            daily_fx = defaultdict(list)
+            # EUR base: fxRateToBase on USD trades IS the USD→EUR rate directly.
+            # IBKR assigns two rates per day: an intraday rate (ExchTrades) and
+            # a settlement rate (BookTrades at 16:20). Prefer ExchTrade rates;
+            # fall back to BookTrade rate on days with only BookTrades (e.g.
+            # pure assignment/expiry days like OpEx Fridays).
+            daily_exch = defaultdict(list)
+            daily_book = defaultdict(list)
             for t in trades:
                 curr = t.get('currency', '')
                 fx = safe_float(t.get('fxRateToBase'), 0)
                 dt = (t.get('dateTime') or '')[:10]
                 if curr == 'USD' and fx > 0 and dt:
-                    daily_fx[dt].append(fx)
-            fx_map = {d: sum(r) / len(r) for d, r in daily_fx.items()}
+                    if t.get('transactionType') == 'BookTrade':
+                        daily_book[dt].append(fx)
+                    else:
+                        daily_exch[dt].append(fx)
+            fx_map = {}
+            for d in set(daily_exch) | set(daily_book):
+                if d in daily_exch:
+                    fx_map[d] = sum(daily_exch[d]) / len(daily_exch[d])
+                else:
+                    fx_map[d] = sum(daily_book[d]) / len(daily_book[d])
         else:
             # USD base: fxRateToBase=1 for USD trades (useless), use usd_to_eur_rates map
             fx_map = {d.strftime('%Y-%m-%d'): r for d, r in usd_to_eur_rates.items()}
@@ -1838,6 +1851,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if idx >= len(fx_dates):
                 return fx_map[fx_dates[-1]]
             return fx_map[fx_dates[idx - 1]]
+
         lots_processed = 0
 
         for lot in closed_lots:
