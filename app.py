@@ -1372,6 +1372,7 @@ if trade_details:
                     elif source == 'zufluss': anmerkung = r.get('description', 'Zufluss')
                     elif source == 'zufluss_korrektur': anmerkung = r.get('description', 'Vorjahres-Korrektur')
                     elif source == 'tageskurs_korrektur': anmerkung = r.get('description', 'Tageskurs')
+                    elif source == 'cross_year_put_korrektur': anmerkung = r.get('description', 'Cross-Year Put-Korrektur')
                     bs = r.get('buySell', ''); oc = r.get('openClose', '')
                     if bs == 'SELL' and oc == 'O': bs_label = 'STO'
                     elif bs == 'BUY' and oc == 'C': bs_label = 'BTC'
@@ -1391,7 +1392,7 @@ if trade_details:
                         cell = ws.cell(row=row_num, column=ci, value=val); cell.font = normal_font
                         if ci in (8, 9, 10, 11, 14) and isinstance(val, (int, float)): cell.number_format = num_fmt_eur
                         elif ci == 13 and isinstance(val, (int, float)): cell.number_format = num_fmt_4d
-                    if source in ('stillhalter_korrektur', 'zufluss', 'zufluss_korrektur', 'tageskurs_korrektur'):
+                    if source in ('stillhalter_korrektur', 'zufluss', 'zufluss_korrektur', 'tageskurs_korrektur', 'cross_year_put_korrektur'):
                         for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = korr_fill; ws.cell(row=row_num, column=ci).font = korr_font
                     elif pnl_eur > 0.005:
                         for ci in range(1, len(cols) + 1): ws.cell(row=row_num, column=ci).fill = gain_fill; ws.cell(row=row_num, column=ci).font = gain_font

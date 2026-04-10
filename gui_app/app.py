@@ -1459,6 +1459,8 @@ if trade_details:
                         anmerkung = r.get('description', 'Vorjahres-Korrektur')
                     elif source == 'tageskurs_korrektur':
                         anmerkung = r.get('description', 'Tageskurs §20 Abs. 4')
+                    elif source == 'cross_year_put_korrektur':
+                        anmerkung = r.get('description', 'Cross-Year Put-Korrektur')
 
                     # Readable open/close label
                     bs = r.get('buySell', '')
@@ -1502,7 +1504,7 @@ if trade_details:
                             cell.number_format = num_fmt_4d
 
                     # Row coloring
-                    if source in ('stillhalter_korrektur', 'zufluss', 'zufluss_korrektur', 'tageskurs_korrektur'):
+                    if source in ('stillhalter_korrektur', 'zufluss', 'zufluss_korrektur', 'tageskurs_korrektur', 'cross_year_put_korrektur'):
                         for ci in range(1, len(cols) + 1):
                             ws.cell(row=row_num, column=ci).fill = korr_fill
                             ws.cell(row=row_num, column=ci).font = korr_font
