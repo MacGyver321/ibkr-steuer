@@ -1960,7 +1960,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     # --- Per-Lot FX Correction (CLOSED_LOT Tageskurs-Methode) ---
     # Compares IBKR method (net PnL × close rate) vs. correct method
     # (proceeds × close rate - cost × open rate) per FIFO lot.
-    # Delta per lot = cost_trade_ccy × (fxRate_open - fxRate_close)
+    # Delta per lot = cost_trade_ccy × (fxRate_close - fxRate_open)
+    # IBKR CLOSED_LOT: cost > 0 bei Longs (Kaufpreis), cost < 0 bei Shorts (Verkaufserlös)
     fx_correction_total = 0.0
     fx_correction_details = []
     fx_corr_by_topf = {'Topf1': 0.0, 'Topf2': 0.0, 'KAP-INV': 0.0}
@@ -2046,7 +2047,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             if fx_close <= 0 or fx_open <= 0:
                 continue
 
-            delta = cost_raw * (fx_open - fx_close)
+            delta = cost_raw * (fx_close - fx_open)
             fx_correction_total += delta
             lots_processed += 1
 
