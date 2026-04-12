@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
 """Regression test runner: vergleicht Steuerberechnung gegen erwartete Werte.
 
-Nutzt test_expectations.json als Referenz. Läuft sowohl mit Demo-Daten (im Repo)
-als auch mit lokalen Audit-Daten (test_data/, gitignored).
+Nutzt test_data/audit_expectations.json als Referenz (echte IBKR-Daten, gitignored).
 
 Usage:
     python run_tests.py              # alle verfügbaren Szenarien
-    python run_tests.py demo         # nur Demo-Szenarien (im Repo)
-    python run_tests.py audit        # nur Audit-Szenarien (lokal)
 """
 import json, os, sys, tempfile
 
 SCENARIOS = {
-    "demo_eur_single": {
-        "extract": "python extract_ibkr_data.py demo/demo_2025.xml {out}",
-    },
-    "demo_eur_multi": {
-        "extract": "python extract_ibkr_data.py demo/demo_2025.xml {out} --fx-history demo/demo_2021.xml demo/demo_2022.xml demo/demo_2023.xml demo/demo_2024.xml",
-    },
-    "demo_ext": {
-        "extract": "python extract_ibkr_data.py demo/demo2_ext_2025.xml {out} --fx-history demo/demo2_ext_2024.xml",
-    },
-    "demo_usd": {
-        "extract": "python extract_ibkr_data.py demo/demo_usd_2025.xml {out}",
-    },
     "audit1_haupt": {
         "extract": "python extract_ibkr_data.py test_data/audit1_2024.xml {out} --history test_data/audit1_2023_history.xml",
     },
@@ -45,18 +30,18 @@ FIELD_KEYS = {
 }
 
 
-def run_tests(filter_mode=None):
+def run_tests():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
 
-    with open('test_expectations.json') as f:
-        expectations = json.load(f)
-
-    # Merge local audit expectations (gitignored) if available
     audit_path = os.path.join(script_dir, 'test_data', 'audit_expectations.json')
-    if os.path.exists(audit_path):
-        with open(audit_path) as f:
-            expectations.update(json.load(f))
+    if not os.path.exists(audit_path):
+        print("FEHLER: test_data/audit_expectations.json nicht gefunden.")
+        print("Audit-Daten (echte IBKR-XMLs) werden lokal benötigt.")
+        sys.exit(1)
+
+    with open(audit_path) as f:
+        expectations = json.load(f)
 
     from calculate_tax_report import calculate_tax
 
@@ -67,12 +52,6 @@ def run_tests(filter_mode=None):
     for name, scenario in SCENARIOS.items():
         exp = expectations.get(name)
         if not exp:
-            continue
-
-        is_audit = not exp.get('in_repo', True)
-        if filter_mode == 'demo' and is_audit:
-            continue
-        if filter_mode == 'audit' and not is_audit:
             continue
 
         # Check if source files exist
@@ -118,5 +97,4 @@ def run_tests(filter_mode=None):
 
 
 if __name__ == '__main__':
-    mode = sys.argv[1] if len(sys.argv) > 1 else None
-    run_tests(mode)
+    run_tests()
