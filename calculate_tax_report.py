@@ -366,6 +366,48 @@ def calculate_fx_gains(trades, fx_transactions, tax_year, base_currency='EUR'):
     return results, total_gain, total_loss, has_prior_data
 
 
+def _get_open_option_sells(trades, a_cat, strike, expiry, pc, assignment_qty_for_series):
+    """Return only SELL trades still open after FIFO-consuming closed positions.
+
+    IBKR may have multiple SELL ExchTrades for the same option series (strike/expiry/putCall).
+    Some may have been bought back (BUY ExchTrade) or expired worthless before an assignment.
+    This function uses FIFO to determine which sells are still open:
+      close_qty = total_sell_qty - assignment_qty_for_series
+    The oldest close_qty sells are consumed; the remaining are returned with '_open_qty' set.
+    """
+    all_sells = sorted(
+        [t for t in trades
+         if t.get('assetCategory') == a_cat
+         and t.get('transactionType') == 'ExchTrade'
+         and t.get('strike') == strike
+         and t.get('expiry') == expiry
+         and t.get('putCall') == pc
+         and t.get('buySell') == 'SELL'],
+        key=lambda t: t.get('dateTime', '') or t.get('tradeDate', '')
+    )
+    total_sell_qty = sum(abs(int(safe_float(t.get('quantity')))) for t in all_sells)
+    close_qty = max(0, total_sell_qty - assignment_qty_for_series)
+
+    remaining_close = close_qty
+    open_sells = []
+    for s in all_sells:
+        s_qty = abs(int(safe_float(s.get('quantity'))))
+        if remaining_close >= s_qty:
+            remaining_close -= s_qty
+            continue  # Fully consumed by close (buyback or expiry)
+        elif remaining_close > 0:
+            open_qty = s_qty - remaining_close
+            remaining_close = 0
+            s_copy = dict(s)
+            s_copy['_open_qty'] = open_qty
+            open_sells.append(s_copy)
+        else:
+            s_copy = dict(s)
+            s_copy['_open_qty'] = s_qty
+            open_sells.append(s_copy)
+    return open_sells
+
+
 def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     # 0. Detect base currency, tax year, and XML metadata from account_info.csv
     base_currency = 'EUR'  # default — most IBKR accounts for German tax filers are EUR-based
@@ -709,17 +751,21 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         if not strike or not expiry or not pc or a_qty == 0:
             continue
 
-        # Opposite side: if assignment is BUY (closing short), original was SELL (opening)
-        orig_side = 'SELL' if a.get('buySell') == 'BUY' else 'BUY'
+        # Total assignment qty for this series (all years) to determine open sells
+        assign_qty_series = sum(
+            abs(int(safe_float(t.get('quantity'))))
+            for t in trades
+            if t.get('assetCategory') == a_cat
+            and t.get('transactionType') == 'BookTrade'
+            and t.get('buySell') == 'BUY'
+            and t.get('strike') == strike
+            and t.get('expiry') == expiry
+            and t.get('putCall') == pc
+            and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01
+        )
 
-        # Find ALL original opening ExchTrades (may be multiple partial fills)
-        originals = [t for t in trades
-                     if t.get('assetCategory') == a_cat
-                     and t.get('transactionType') == 'ExchTrade'
-                     and t.get('strike') == strike
-                     and t.get('expiry') == expiry
-                     and t.get('putCall') == pc
-                     and t.get('buySell') == orig_side]
+        # Find only OPEN original sells (FIFO: bought-back/expired positions consumed first)
+        originals = _get_open_option_sells(trades, a_cat, strike, expiry, pc, assign_qty_series)
 
         if not originals:
             symbol = a.get('symbol', f"{strike} {expiry} {pc}")
@@ -734,7 +780,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             })
             continue
 
-        # Weighted average premium across all fills
+        # Weighted average premium across open fills only
         # Use tradePrice (actual fill price) if available, fall back to closePrice
         total_premium_raw = 0.0
         total_commission = 0.0
@@ -743,8 +789,12 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
 
         for orig in originals:
             price = safe_float(orig.get('tradePrice')) or safe_float(orig.get('closePrice'))
-            qty = abs(int(safe_float(orig.get('quantity'))))
+            qty = orig.get('_open_qty', abs(int(safe_float(orig.get('quantity')))))
+            orig_full_qty = abs(int(safe_float(orig.get('quantity'))))
             comm = safe_float(orig.get('ibCommission'), 0)
+            # Scale commission proportionally if sell was partially consumed
+            if orig_full_qty > 0 and qty < orig_full_qty:
+                comm = comm * qty / orig_full_qty
             if qty > 0 and price > 0:
                 total_premium_raw += price * mult * qty
                 total_commission += comm
@@ -753,14 +803,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         if total_orig_qty == 0 or total_premium_raw == 0:
             continue
 
-        # Scale to assignment quantity (may be less than total originally sold)
+        # Scale to assignment quantity (may be less than total open sells)
         premium_raw = total_premium_raw * a_qty / total_orig_qty
         commission_raw = total_commission * a_qty / total_orig_qty
 
         # Convert to EUR using the original trade's FX rate
-        # Use weighted average rate from originals
-        fx_weighted = sum(safe_float(o.get('fxRateToBase'), 1.0) * abs(int(safe_float(o.get('quantity'))))
-                         for o in originals if safe_float(o.get('quantity')) != 0)
+        # Use weighted average rate from open originals only
+        fx_weighted = sum(safe_float(o.get('fxRateToBase'), 1.0) * o.get('_open_qty', abs(int(safe_float(o.get('quantity')))))
+                         for o in originals)
         fx_to_base = fx_weighted / total_orig_qty if total_orig_qty else 1.0
 
         # Net premium = gross - commissions (ibCommission is negative for fees, positive for rebates)
@@ -1314,14 +1364,21 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         if not strike or not underlying or a_qty == 0:
             continue
 
-        # Find original put SELL
-        originals = [t for t in trades
-                     if t.get('assetCategory') == a_cat
-                     and t.get('transactionType') == 'ExchTrade'
-                     and t.get('strike') == strike
-                     and t.get('expiry') == expiry
-                     and t.get('putCall') == 'P'
-                     and t.get('buySell') == 'SELL']
+        # Total assignment qty for this series (all years) to determine open sells
+        assign_qty_series = sum(
+            abs(int(safe_float(t.get('quantity'))))
+            for t in trades
+            if t.get('assetCategory') == a_cat
+            and t.get('transactionType') == 'BookTrade'
+            and t.get('buySell') == 'BUY'
+            and t.get('strike') == strike
+            and t.get('expiry') == expiry
+            and t.get('putCall') == 'P'
+            and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01
+        )
+
+        # Find only OPEN original sells (FIFO: bought-back/expired positions consumed first)
+        originals = _get_open_option_sells(trades, a_cat, strike, expiry, 'P', assign_qty_series)
 
         if not originals:
             continue
@@ -1331,8 +1388,11 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         total_orig_qty = 0
         for orig in originals:
             price = safe_float(orig.get('tradePrice')) or safe_float(orig.get('closePrice'))
-            qty = abs(int(safe_float(orig.get('quantity'))))
+            qty = orig.get('_open_qty', abs(int(safe_float(orig.get('quantity')))))
+            orig_full_qty = abs(int(safe_float(orig.get('quantity'))))
             comm = safe_float(orig.get('ibCommission'), 0)
+            if orig_full_qty > 0 and qty < orig_full_qty:
+                comm = comm * qty / orig_full_qty
             if qty > 0 and price > 0:
                 total_premium_raw += price * mult * qty
                 total_commission += comm
@@ -1346,8 +1406,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         net_premium_raw = premium_raw + commission_raw
         shares = a_qty * mult
 
-        fx_weighted = sum(safe_float(o.get('fxRateToBase'), 1.0) * abs(int(safe_float(o.get('quantity'))))
-                         for o in originals if safe_float(o.get('quantity')) != 0)
+        fx_weighted = sum(safe_float(o.get('fxRateToBase'), 1.0) * o.get('_open_qty', abs(int(safe_float(o.get('quantity')))))
+                         for o in originals)
         fx_to_base = fx_weighted / total_orig_qty if total_orig_qty else 1.0
 
         if base_currency == 'EUR':
@@ -2022,13 +2082,19 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         underlying = a.get('underlyingSymbol', '')
         if not strike or not underlying or a_qty == 0:
             continue
-        originals = [t for t in trades
-                     if t.get('assetCategory') == a_cat
-                     and t.get('transactionType') == 'ExchTrade'
-                     and t.get('strike') == strike
-                     and t.get('expiry') == expiry
-                     and t.get('putCall') == 'P'
-                     and t.get('buySell') == 'SELL']
+        # Total assignment qty for this series (all years) to determine open sells
+        assign_qty_series = sum(
+            abs(int(safe_float(t.get('quantity'))))
+            for t in trades
+            if t.get('assetCategory') == a_cat
+            and t.get('transactionType') == 'BookTrade'
+            and t.get('buySell') == 'BUY'
+            and t.get('strike') == strike
+            and t.get('expiry') == expiry
+            and t.get('putCall') == 'P'
+            and abs(safe_float(t.get('fifoPnlRealized'))) < 0.01
+        )
+        originals = _get_open_option_sells(trades, a_cat, strike, expiry, 'P', assign_qty_series)
         if not originals:
             continue
         total_premium_raw = 0.0
@@ -2036,8 +2102,11 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         total_orig_qty = 0
         for orig in originals:
             price = safe_float(orig.get('tradePrice')) or safe_float(orig.get('closePrice'))
-            qty = abs(int(safe_float(orig.get('quantity'))))
+            qty = orig.get('_open_qty', abs(int(safe_float(orig.get('quantity')))))
+            orig_full_qty = abs(int(safe_float(orig.get('quantity'))))
             comm = safe_float(orig.get('ibCommission'), 0)
+            if orig_full_qty > 0 and qty < orig_full_qty:
+                comm = comm * qty / orig_full_qty
             if qty > 0 and price > 0:
                 total_premium_raw += price * mult * qty
                 total_commission += comm
