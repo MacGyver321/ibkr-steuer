@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 import extract_ibkr_data
 import calculate_tax_report
+from etf_classification import get_etf_info, is_anlage_so, get_classification
 
 st.set_page_config(
     page_title="IBKR Steuerbericht",
@@ -482,6 +483,13 @@ def merge_report_data(reports):
                     existing[nk] = existing.get(nk, 0) + data.get(nk, 0)
     merged['anlage_so'] = merged_so
 
+    # all_traded_etf_isins: Union aller Accounts (Issue #51 - für Override-UI)
+    merged_all_etfs = set()
+    for r in reports:
+        merged_all_etfs.update(r.get('all_traded_etf_isins', []))
+    merged['all_traded_etf_isins'] = sorted(merged_all_etfs)
+    merged['anlage_so_overrides_applied'] = list(reports[0].get('anlage_so_overrides_applied', []))
+
     # Audit merge
     merged_audit = {
         'funds_processed': sum(r.get('audit', {}).get('funds_processed', 0) for r in reports),
@@ -733,7 +741,11 @@ with st.spinner("Berechne Steuerreport…"):
                         extract_ibkr_data.extract_fx_multi_xml(all_xmls_paths, tmp)
                     else:
                         extract_ibkr_data.parse_ibkr_xml(xml_path, tmp)
-                d_acct = calculate_tax_report.calculate_tax(tmp, fx_csv_path=csv_report_path)
+                d_acct = calculate_tax_report.calculate_tax(
+                    tmp,
+                    fx_csv_path=csv_report_path,
+                    anlage_so_overrides=st.session_state.get('anlage_so_overrides', []),
+                )
 
                 # Validate base currency consistency
                 if reports and d_acct.get('base_currency') != reports[0].get('base_currency'):
@@ -1202,6 +1214,59 @@ if has_etf_data and invstg_aktiv:
             div_tax = info.get('div_taxable', 0)
             etf_table += f"| {info.get('ticker', isin)} | {cls_short} | {tfs_pct} | {fmt_de(gv_raw)} | {fmt_de(gv_tax)} | {fmt_de(div_raw)} | {fmt_de(div_tax)} |\n"
         st.markdown(etf_table)
+
+
+# ── Anlage SO — manuelle Zuordnung (Issue #51) ───────────────────────────────
+# Nutzer kann ETFs manuell als Anlage SO markieren, auch wenn sie nicht in der
+# Klassifizierungstabelle stehen (z. B. physische Edelmetall-ETCs mit Lieferanspruch).
+all_traded_etf_isins = d.get('all_traded_etf_isins', [])
+_so_lookup = d.get('anlage_so', {}).get('by_isin', {})
+
+
+def _anlage_so_label(isin):
+    info = get_etf_info(isin)
+    if info:
+        name = info.get('name', '')
+        return f"{info['ticker']} - {name} ({isin})" if name else f"{info['ticker']} ({isin})"
+    fb = etf_by_isin.get(isin) or _so_lookup.get(isin) or {}
+    ticker = fb.get('ticker', isin[:12])
+    name = fb.get('name', '')
+    return f"{ticker} - {name} ({isin})" if name else f"{ticker} ({isin})"
+
+
+selectable_etfs = sorted(
+    isin for isin in all_traded_etf_isins
+    if isin
+    and not is_anlage_so(isin)
+    # Nur ETCs (no_invstg) und unklassifizierte ETFs erlauben — Aktien-/Misch-/Sonstige
+    # Fonds sind InvStG-Investmentfonds und gehören nach §20 EStG, nicht §23 EStG.
+    and get_classification(isin) in ('no_invstg', None)
+)
+
+# Defensive-Bereinigung: Overrides aus früheren Sessions/XML-Uploads wegnehmen,
+# wenn ihre ISIN in der aktuellen Auswahl nicht mehr vorkommt.
+_prev_overrides = st.session_state.get('anlage_so_overrides', [])
+_clean_overrides = [isin for isin in _prev_overrides if isin in selectable_etfs]
+if _clean_overrides != list(_prev_overrides):
+    st.session_state['anlage_so_overrides'] = _clean_overrides
+
+if selectable_etfs:
+    section_title("Anlage SO — manuelle Zuordnung")
+    st.markdown("""
+<div style="background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
+    <strong style="color: #fbbf24;">Nur für physische Edelmetall-ETCs mit Lieferanspruch</strong>
+    (BFH VIII R 4/15, analog zu Xetra-Gold / EUWAX Gold II). Die Zuordnung gilt nur für diese Session -
+    ausgewählte ETFs werden aus Anlage KAP-INV entfernt und auf Anlage SO (§23 EStG) berechnet,
+    inkl. 1-Jahres-Spekulationsfrist.
+</div>
+""", unsafe_allow_html=True)
+    st.multiselect(
+        "ETFs als Anlage SO (§23 EStG) behandeln",
+        options=selectable_etfs,
+        format_func=_anlage_so_label,
+        key='anlage_so_overrides',
+        help="Die Auswahl wird beim nächsten Rerun berücksichtigt. Abwählen verschiebt den ETF zurück in KAP-INV.",
+    )
 
 
 # ── Anlage SO · Private Veräußerungsgeschäfte (§23 EStG) ──────────────────────

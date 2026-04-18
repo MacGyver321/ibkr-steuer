@@ -345,6 +345,11 @@ ETF_CLASSIFICATION = {
     'DE000EWG0LD1': ('GOLD1', 'EUWAX Gold I',                                    'anlage_so'),  # physisches Gold-ETC, Lieferanspruch
     'DE000A0S9GB0': ('4GLD',  'Xetra-Gold',                                      'anlage_so'),  # physisches Gold-ETC, Lieferanspruch
 
+    # --- Weitere physische Edelmetall-ETCs mit Lieferanspruch (Anlage SO) ---
+    # Analog zu deutschen Gold-ETCs: physisch besichert, Lieferanspruch → § 23 Abs. 1 Nr. 2 EStG
+    # Nach 1 Jahr Haltedauer steuerfrei (Spekulationsfrist)
+    'JE00BQRFDY49': ('WSLV',  'WisdomTree Core Physical Silver',                 'anlage_so'),  # physisches Silber-ETC, Lieferanspruch (Issue #51)
+
     # --- Gehebelte/Inverse Rohstoff-ETPs (kein Investmentfonds) ---
     'IE00B6X4BP29': ('3GOS',  'WisdomTree Gold 3x Daily Short',                  'no_invstg'),  # gehebeltes ETP, Schuldverschreibung
 

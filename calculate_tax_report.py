@@ -423,7 +423,7 @@ def _get_open_option_sells(trades, a_cat, strike, expiry, pc, assignment_qty_for
     return open_sells
 
 
-def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
+def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrides=None):
     # 0. Detect base currency, tax year, and XML metadata from account_info.csv
     base_currency = 'EUR'  # default — most IBKR accounts for German tax filers are EUR-based
     xml_has_fx_data = False
@@ -535,6 +535,17 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
 
     # 2b. Build ETF lookup from financial_instruments.csv
     from etf_classification import get_classification, get_etf_info, get_teilfreistellung, is_known_etf, ETF_CLASSIFICATION
+
+    anlage_so_overrides_set = set(anlage_so_overrides or ())
+
+    def _effective_classification(isin):
+        # Respects Session-Overrides aus der GUI (Issue #51): Nutzer kann ETFs
+        # manuell als Anlage SO markieren, auch wenn sie nicht im Lookup stehen.
+        if isin and isin in anlage_so_overrides_set:
+            return 'anlage_so'
+        entry = ETF_CLASSIFICATION.get(isin)
+        return entry[2] if entry else None
+
     etf_isins = set()  # all ISINs that IBKR marks as ETF (subCategory)
     symbol_to_isin = {}  # for Stillhalter underlying lookup
     fi_path = os.path.join(ib_tax_dir, 'financial_instruments.csv')
@@ -625,7 +636,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             isin = t.get('isin', '').strip()
             sub = t.get('subCategory', '')
             if sub == 'ETF' and isin:
-                cls = get_classification(isin)
+                cls = _effective_classification(isin)
                 if cls == 'anlage_so':
                     # Physical Gold-ETC with delivery claim → §23 EStG (not §20)
                     # Excluded from KAP entirely; holding period determines taxability
@@ -681,7 +692,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         sub = t.get('subCategory', '')
         isin = t.get('isin', '').strip()
         if category == 'STK' and sub == 'ETF' and isin:
-            cls = get_classification(isin)
+            cls = _effective_classification(isin)
             if cls == 'anlage_so':
                 topf = 'Anlage SO'
             elif cls == 'no_invstg':
@@ -874,6 +885,31 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     stk_loss_corr_cy = 0.0
     etf_gain_corr_cy = 0.0
     etf_loss_corr_cy = 0.0
+    # Anlage-SO-Overrides (Issue #51): Prämien-Lookup für Lot-Level-Matching im
+    # Anlage-SO-Build. Key: (underlying_symbol, assignment_date_YYYY-MM-DD).
+    # Wird aus Stillhalter-current-year und prior-put-assignments befüllt — getrennt
+    # pro Assignment, damit Mixed-Holding-Period-Fälle pro Lot korrekt zugeordnet werden.
+    _so_premium_lookup = {}  # {(symbol, 'YYYY-MM-DD'): {'shares': int, 'premium_eur': float}}
+    # Populate aus current-year Puts, wenn Underlying anlage_so ist
+    for det in stillhalter_details:
+        if det.get('putCall') != 'P':
+            continue
+        u_sym = det['symbol'].split()[0] if det.get('symbol') else ''
+        u_isin = symbol_to_isin.get(u_sym, '')
+        if not u_isin or _effective_classification(u_isin) != 'anlage_so':
+            continue
+        a_date_str = (det.get('assignment_date') or '')[:10]
+        if not a_date_str:
+            continue
+        mult = det.get('multiplier', 100)
+        shares = det['quantity'] * mult
+        if shares <= 0:
+            continue
+        key = (u_sym, a_date_str)
+        _so_premium_lookup.setdefault(key, {'shares': 0, 'premium_eur': 0.0})
+        _so_premium_lookup[key]['shares'] += shares
+        _so_premium_lookup[key]['premium_eur'] += det.get('premium_eur', 0)
+
     if stillhalter_premium_eur > 0:
         # Build set of underlying symbols that have stock SELL PnL in tax_year
         stk_sold_symbols = set()
@@ -904,8 +940,10 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 continue
 
             if underlying_isin and underlying_isin in etf_isins:
-                cls = get_classification(underlying_isin)
-                if cls != 'no_invstg':
+                cls = _effective_classification(underlying_isin)
+                # anlage_so-Underlyings nicht als KAP-INV-Prämie zählen (Issue #51):
+                # Optionsprämie bleibt §20 Abs. 1 Nr. 11 EStG (Topf 2), aber nicht KAP-INV.
+                if cls not in ('no_invstg', 'anlage_so'):
                     etf_premium += det['premium_eur']
                     continue
             stk_premium += det['premium_eur']
@@ -929,7 +967,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             # Determine source topf
             if det['putCall'] == 'P' and underlying not in stk_sold_symbols:
                 source_topf = 'Topf2'  # put_nosell: premium only in Topf 2, no subtraction
-            elif u_isin and u_isin in etf_isins and get_classification(u_isin) != 'no_invstg':
+            elif u_isin and u_isin in etf_isins and _effective_classification(u_isin) == 'anlage_so':
+                source_topf = 'Anlage SO'
+            elif u_isin and u_isin in etf_isins and _effective_classification(u_isin) not in ('no_invstg', 'anlage_so'):
                 source_topf = 'KAP-INV'
             else:
                 source_topf = 'Topf1'
@@ -1009,15 +1049,23 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 # Per-trade gain/loss split (Issue #23 pattern)
                 correction_eur = original_pnl_eur - row['pnl_eur']
                 row_isin = row.get('isin', '')
+                _row_cls = _effective_classification(row_isin) if row_isin else None
+                is_so = bool(row_isin and row_isin in etf_isins and _row_cls == 'anlage_so')
                 is_etf = bool(row_isin and row_isin in etf_isins
-                              and get_classification(row_isin) != 'no_invstg')
+                              and _row_cls not in ('no_invstg', 'anlage_so'))
                 if original_pnl_eur > 0:
                     from_gain = min(correction_eur, original_pnl_eur)
                     from_loss = correction_eur - from_gain
                 else:
                     from_gain = 0.0
                     from_loss = correction_eur
-                if is_etf:
+                if is_so:
+                    # Anlage-SO-Override (Issue #51): Keine Aggregation auf
+                    # stocks/ETF-Pools. Die debug_row ist bereits korrigiert
+                    # (Zeilen oben); Anlage-SO-PnL-Korrektur läuft per Lot im
+                    # Anlage-SO-Build via _so_premium_lookup.
+                    pass
+                elif is_etf:
                     etf_gain_corr_cy += from_gain
                     etf_loss_corr_cy += from_loss
                     if row_isin not in _etf_by_isin_corr_cy:
@@ -1487,6 +1535,13 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             'strike': strike,
             'year': a_date.year if a_date else 0,
         })
+        # Anlage-SO-Lookup für cross-year (Issue #51)
+        u_isin_xy = symbol_to_isin.get(underlying, '')
+        if u_isin_xy and _effective_classification(u_isin_xy) == 'anlage_so' and a_date:
+            so_key = (underlying, a_date.strftime('%Y-%m-%d'))
+            _so_premium_lookup.setdefault(so_key, {'shares': 0, 'premium_eur': 0.0})
+            _so_premium_lookup[so_key]['shares'] += shares
+            _so_premium_lookup[so_key]['premium_eur'] += premium_eur
 
     # Apply corrections to STK sells in tax_year
     if put_assignment_lots:
@@ -1552,13 +1607,16 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
 
             if trade_corr_total > 0:
                 underlying_isin = symbol_to_isin.get(sym, '')
+                _cls_xy = _effective_classification(underlying_isin) if underlying_isin else None
+                is_so = bool(underlying_isin and underlying_isin in etf_isins and _cls_xy == 'anlage_so')
                 is_etf = bool(underlying_isin and underlying_isin in etf_isins
-                              and get_classification(underlying_isin) != 'no_invstg')
+                              and _cls_xy not in ('no_invstg', 'anlage_so'))
                 _trade_corr_groups.append({
                     'pnl_eur': trade_pnl_eur,
                     'total_corr': trade_corr_total,
                     'is_etf': is_etf,
-                    'isin': underlying_isin if is_etf else '',
+                    'is_so': is_so,
+                    'isin': underlying_isin if (is_etf or is_so) else '',
                 })
 
         if cross_year_put_total > 0:
@@ -1581,7 +1639,11 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     from_gain = 0.0
                     from_loss = corr
 
-                if g['is_etf']:
+                if g.get('is_so'):
+                    # Anlage-SO-Override (Issue #51): Keine Aggregation auf stocks_gain.
+                    # Korrektur läuft per Lot im Anlage-SO-Build via _so_premium_lookup.
+                    pass
+                elif g['is_etf']:
                     etf_gain_corr += from_gain
                     etf_loss_corr += from_loss
                     if g['isin'] in etf_by_isin:
@@ -1715,13 +1777,16 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 amount_eur = amount_usd * rate_eur
         
         # Check if this is an InvStG ETF dividend/WHT
+        # Anlage-SO-ETFs (auch via Override, Issue #51) landen hier NICHT, denn
+        # Ausschüttungen auf physische Edelmetall-ETCs sind nicht als InvStG-
+        # Fondsausschüttungen zu behandeln — sie fließen in reguläre Dividenden.
         is_etf_fund = False
         fund_isin = ''
         if f.get('subCategory') == 'ETF':
             fund_isin = f.get('isin', '').strip()
             if fund_isin:
-                cls = get_classification(fund_isin)
-                if cls != 'no_invstg':
+                cls = _effective_classification(fund_isin)
+                if cls not in ('no_invstg', 'anlage_so'):
                     is_etf_fund = True
 
         if code == 'DIV':
@@ -1896,7 +1961,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 if asset == 'STK':
                     sub_cat = s_row.get('subCategory', '')
                     if sub_cat == 'ETF':
-                        cls = get_classification(isin)
+                        cls = _effective_classification(isin)
                         if cls == 'anlage_so':
                             # Physical Gold-ETC → §23 EStG, not KAP
                             summary_topf = 'Anlage SO'
@@ -2326,7 +2391,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
             sub = lot.get('subCategory', '')
             isin = lot.get('isin', '').strip()
             if category == 'STK' and sub == 'ETF' and isin:
-                cls = get_classification(isin)
+                cls = _effective_classification(isin)
                 if cls == 'anlage_so':
                     continue  # Gold-ETCs excluded from KAP entirely
                 topf = 'KAP-INV' if cls not in ('no_invstg', None) else 'Topf2'
@@ -2405,6 +2470,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
 
         if closed_lots_for_so:
             # Use CLOSED_LOT data for exact per-lot holding period
+            _so_lot_corr_total = 0.0
             for lot in closed_lots_for_so:
                 report_date = parse_date(lot.get('reportDate') or lot.get('dateTime'))
                 if not report_date or report_date.year != tax_year:
@@ -2425,6 +2491,19 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                 qty = safe_float(lot.get('quantity'), 0)
                 info = get_etf_info(isin)
                 ticker = info['ticker'] if info else isin[:12]
+
+                # Lot-Level Stillhalter-Korrektur für Anlage-SO-Override (Issue #51):
+                # Wenn dieser Lot über ein Put-Assignment entstanden ist, die eingebettete
+                # Prämie aus der PnL rausrechnen (sonst Double-Count — Prämie ist bereits
+                # separat in Topf 2 gebucht).
+                if open_dt and _so_premium_lookup:
+                    lot_sym = ((lot.get('symbol') or '').strip().split() or [''])[0]
+                    open_date_str = str(open_dt)[:10]
+                    so_entry = _so_premium_lookup.get((lot_sym, open_date_str))
+                    if so_entry and so_entry['shares'] > 0:
+                        premium_for_lot = so_entry['premium_eur'] * abs(qty) / so_entry['shares']
+                        pnl_eur -= premium_for_lot
+                        _so_lot_corr_total += premium_for_lot
 
                 if open_dt:
                     # §23 EStG: > 1 year holding = tax free
@@ -2468,6 +2547,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
                     anlage_so_result['by_isin'][isin]['taxable'] += pnl_eur
 
             print(f"\nAnlage SO (§23 EStG): {len(anlage_so_result['details'])} Gold-ETC-Lots analysiert.")
+            if _so_lot_corr_total > 0.01:
+                print(f"  Stillhalter-Korrektur (Lot-Level): -{_so_lot_corr_total:,.2f} EUR (Prämie bereits in Topf 2).")
         else:
             # Fallback: own FIFO from trades for holding period
             # Build buy lots per ISIN from all trades (including history)
@@ -2611,6 +2692,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
     # Sort trade details chronologically for reporting
     debug_rows.sort(key=lambda r: r.get('dateTime', '') or r.get('reportDate', '') or 'zzzz')
 
+    # Alle je in diesem Report vorkommenden ETF-ISINs (unabhängig von Bucket) —
+    # wird von der GUI für die Anlage-SO-Override-Auswahl gebraucht (Issue #51).
+    all_traded_etf_isins = sorted(
+        set(isin for isin in etf_isins if isin)
+        | set(isin for isin in etf_by_isin.keys() if isin)
+        | set(t.get('isin', '') for t in anlage_so_trades if t.get('isin'))
+    )
+
     report_data = {
         "zeile_19_netto_eur": zeile_19_netto,
         "zeile_20_stock_gains_eur": zeile_20_stock_gains,
@@ -2668,6 +2757,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None):
         },
         # Anlage SO (§23 EStG — physische Gold-ETCs)
         "anlage_so": anlage_so_result,
+        # Alle ETF-ISINs, die im Report auftauchen (für GUI-Override-Auswahl)
+        "all_traded_etf_isins": all_traded_etf_isins,
+        "anlage_so_overrides_applied": sorted(anlage_so_overrides_set),
         # Trade-level details for FA reporting (Issue #17)
         "trade_details": debug_rows,
         # Plausibility Metadata
