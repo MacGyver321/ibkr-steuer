@@ -1343,9 +1343,9 @@ if has_so_data:
 
     st.markdown(f"""
 <div style="background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.8rem; color: #94a3b8;">
-    <strong style="color: #fbbf24;">Physische Gold-ETCs mit Lieferanspruch</strong> werden nach
+    <strong style="color: #fbbf24;">Physische Edelmetall-ETCs mit Lieferanspruch</strong> werden nach
     <strong>§23 Abs. 1 S. 1 Nr. 2 EStG</strong> als private Veräußerungsgeschäfte behandelt
-    (bestätigt durch <strong>BFH VIII R 4/15</strong> für Xetra-Gold).
+    (bestätigt durch <strong>BFH VIII R 4/15</strong> für Xetra-Gold; analog für Silber/Platin/Palladium).
     Die Spekulationsfrist beträgt <strong>1 Jahr</strong> (§23 Abs. 1 S. 1 Nr. 2 S. 1 EStG) -
     Veräußerungsgewinne nach Ablauf dieser Frist sind <strong style="color: #4ade80;">steuerfrei</strong>.
     Innerhalb der Frist sind sie auf <strong>Anlage SO</strong> zu erklären (nicht auf Anlage KAP).{history_hint}
@@ -1370,11 +1370,11 @@ if has_so_data:
         unsafe_allow_html=True
     )
 
-    with st.expander("Gold-ETC Details nach ISIN"):
-        so_table = "| Ticker | Gesamt | Steuerfrei (> 1J) | Steuerpflichtig (≤ 1J) |\n"
-        so_table += "|--------|-------:|------------------:|-----------------------:|\n"
+    with st.expander("ETC-Details nach ISIN"):
+        so_table = "| Ticker | ISIN | Gesamt | Steuerfrei (> 1J) | Steuerpflichtig (≤ 1J) |\n"
+        so_table += "|--------|------|-------:|------------------:|-----------------------:|\n"
         for isin, info in sorted(so_by_isin.items(), key=lambda x: abs(x[1]['total']), reverse=True):
-            so_table += f"| {info.get('ticker', isin)} | {fmt_de(info['total'])} | {fmt_de(info.get('tax_free', 0))} | {fmt_de(info.get('taxable', 0))} |\n"
+            so_table += f"| {info.get('ticker', isin)} | {isin} | {fmt_de(info['total'])} | {fmt_de(info.get('tax_free', 0))} | {fmt_de(info.get('taxable', 0))} |\n"
         st.markdown(so_table)
 
         so_details = anlage_so.get('details', [])

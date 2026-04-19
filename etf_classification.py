@@ -113,6 +113,7 @@ ETF_CLASSIFICATION = {
     'US92189F7915': ('GDXJ', 'VanEck Junior Gold Miners ETF',                   'aktienfonds'),   # cbonds /etf/787/
     'US37954Y8488': ('SIL',  'Global X Silver Miners ETF',                      'aktienfonds'),   # cbonds /etf/749/
     'US0321086490': ('SILJ', 'Amplify Junior Silver Miners ETF',                'aktienfonds'),   # cbonds /etf/10435/
+    'US92189H8051': ('REMX', 'VanEck Rare Earth/Strategic Metals ETF',          'aktienfonds'),   # cbonds, physische Miner-Aktien
     'US46434G8556': ('RING', 'iShares MSCI Global Gold Miners ETF',             'aktienfonds'),   # cbonds /etf/1109/
     'US46434G8481': ('PICK', 'iShares MSCI Global Metals & Mining Producers ETF', 'aktienfonds'),  # cbonds /etf/1107/
     'US78464A7550': ('XME',  'SPDR S&P Metals & Mining ETF',                    'aktienfonds'),   # cbonds /etf/793/
@@ -328,6 +329,8 @@ ETF_CLASSIFICATION = {
     'US46438F1012': ('IBIT', 'iShares Bitcoin Trust ETF',                       'no_invstg'),  # Spot-Trust, einzelner Basiswert
     'US3896381072': ('ETHE', 'Grayscale Ethereum Trust ETF',                    'no_invstg'),  # Spot-Trust, einzelner Basiswert
     'US3837861092': ('GBTC', 'Grayscale Bitcoin Trust ETF',                     'no_invstg'),  # Spot-Trust, einzelner Basiswert
+    'US0919481095': ('BSOL', 'Bitwise Solana Staking ETF',                      'no_invstg'),  # Spot-Trust (SOL), nicht Investment Company Act 1940 — §20 EStG
+    'DE000A4A59D2': ('BSOL', 'Bitwise Solana Staking ETP (DE)',                 'no_invstg'),  # deutsche ETP-Variante (Schuldverschreibung, kein Fonds)
     'US74347G4405': ('BITO', 'ProShares Bitcoin Strategy ETF',                  'sonstiger_fonds'),  # Investment Company Act 1940, BTC-Futures + Treasuries → InvStG
 
     # --- ETNs (Schuldverschreibungen, kein Fonds) ---

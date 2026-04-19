@@ -555,13 +555,13 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
             isin = fi.get('isin', '').strip()
             if sym and isin:
                 symbol_to_isin[sym] = isin
-            if fi.get('subCategory') == 'ETF' and fi.get('assetCategory') == 'STK' and isin:
+            if fi.get('assetCategory') == 'STK' and isin and (fi.get('subCategory') == 'ETF' or is_known_etf(isin)):
                 etf_isins.add(isin)
     # Also pick up ETFs from trades themselves
     for t in trades:
-        if t.get('subCategory') == 'ETF' and t.get('assetCategory') == 'STK':
+        if t.get('assetCategory') == 'STK':
             isin = t.get('isin', '').strip()
-            if isin:
+            if isin and (t.get('subCategory') == 'ETF' or is_known_etf(isin)):
                 etf_isins.add(isin)
     if etf_isins:
         print(f"ETF-Erkennung: {len(etf_isins)} ETF-ISINs gefunden (subCategory=ETF).")
@@ -635,7 +635,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
         if category == 'STK':
             isin = t.get('isin', '').strip()
             sub = t.get('subCategory', '')
-            if sub == 'ETF' and isin:
+            # Treat as ETF/ETP also when our classification table knows the ISIN even if
+            # IBKR does not flag subCategory="ETF" (Spot-Krypto-Trusts wie BSOL etc.).
+            if isin and (sub == 'ETF' or is_known_etf(isin)):
                 cls = _effective_classification(isin)
                 if cls == 'anlage_so':
                     # Physical Gold-ETC with delivery claim → §23 EStG (not §20)
@@ -691,7 +693,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
         # Collect debug row
         sub = t.get('subCategory', '')
         isin = t.get('isin', '').strip()
-        if category == 'STK' and sub == 'ETF' and isin:
+        if category == 'STK' and isin and (sub == 'ETF' or is_known_etf(isin)):
             cls = _effective_classification(isin)
             if cls == 'anlage_so':
                 topf = 'Anlage SO'
@@ -1008,6 +1010,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
         stk_loss_corr_cy = 0.0
         etf_gain_corr_cy = 0.0
         etf_loss_corr_cy = 0.0
+        nv_gain_corr_cy = 0.0  # no_invstg ETP correction → Topf 2
+        nv_loss_corr_cy = 0.0
         _etf_by_isin_corr_cy = {}
 
         for row in debug_rows:
@@ -1072,6 +1076,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
                         _etf_by_isin_corr_cy[row_isin] = {'gain': 0.0, 'loss': 0.0}
                     _etf_by_isin_corr_cy[row_isin]['gain'] += from_gain
                     _etf_by_isin_corr_cy[row_isin]['loss'] += from_loss
+                elif _row_cls == 'no_invstg':
+                    # no_invstg-ETPs (GLD, IBIT, BSOL, …) wurden im Trade-Loop in
+                    # options_gain/loss gebucht (Topf 2). Der Prämie-Zusatz oben
+                    # addiert die Prämie erneut zu options_gain → hier raus-
+                    # korrigieren, sonst wäre Topf 2 doppelt erfasst und ohne
+                    # Zweig würde fälschlich Topf 1 (stocks) belastet.
+                    nv_gain_corr_cy += from_gain
+                    nv_loss_corr_cy += from_loss
                 else:
                     stk_gain_corr_cy += from_gain
                     stk_loss_corr_cy += from_loss
@@ -1081,6 +1093,18 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
         stocks_loss -= stk_loss_corr_cy
         etf_invstg_gain -= etf_gain_corr_cy
         etf_invstg_loss -= etf_loss_corr_cy
+        options_gain -= nv_gain_corr_cy
+        options_loss -= nv_loss_corr_cy
+        # Shadow-Tracking (Plausibilitätscheck + Topf-2-Aufschlüsselung) synchron halten:
+        # no_invstg_gain/loss speist den GUI-Plausibilitätscheck gegen pnl_summary.csv,
+        # topf2_by_category die „Aufschlüsselung Topf 2" im Report. Ohne diese Sync
+        # zeigt die Aufschlüsselung (Crypto/Commodity ETPs + Stillhalterprämien) eine
+        # Summe, die den Topf-2-Saldo übersteigt.
+        no_invstg_gain -= nv_gain_corr_cy
+        no_invstg_loss -= nv_loss_corr_cy
+        if 'Crypto/Commodity ETPs' in topf2_by_category:
+            topf2_by_category['Crypto/Commodity ETPs']['gain'] -= nv_gain_corr_cy
+            topf2_by_category['Crypto/Commodity ETPs']['loss'] -= nv_loss_corr_cy
         for _isin, _adj in _etf_by_isin_corr_cy.items():
             if _isin in etf_by_isin:
                 etf_by_isin[_isin]['gain'] -= _adj['gain']
@@ -1647,11 +1671,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
                 is_so = bool(underlying_isin and underlying_isin in etf_isins and _cls_xy == 'anlage_so')
                 is_etf = bool(underlying_isin and underlying_isin in etf_isins
                               and _cls_xy not in ('no_invstg', 'anlage_so'))
+                is_no_invstg = bool(underlying_isin and underlying_isin in etf_isins
+                                    and _cls_xy == 'no_invstg')
                 _trade_corr_groups.append({
                     'pnl_eur': trade_pnl_eur,
                     'total_corr': trade_corr_total,
                     'is_etf': is_etf,
                     'is_so': is_so,
+                    'is_no_invstg': is_no_invstg,
                     'isin': underlying_isin if (is_etf or is_so) else '',
                 })
 
@@ -1664,6 +1691,8 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
             stk_loss_corr = 0.0
             etf_gain_corr = 0.0
             etf_loss_corr = 0.0
+            nv_gain_corr = 0.0  # no_invstg ETP correction → Topf 2
+            nv_loss_corr = 0.0
 
             for g in _trade_corr_groups:
                 pnl = g['pnl_eur']
@@ -1685,6 +1714,13 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
                     if g['isin'] in etf_by_isin:
                         etf_by_isin[g['isin']]['gain'] -= from_gain
                         etf_by_isin[g['isin']]['loss'] -= from_loss
+                elif g.get('is_no_invstg'):
+                    # no_invstg-ETP (GLD, IBIT, BSOL, …): Trade-PnL lief bereits
+                    # in options_gain/loss (Topf 2). Die Prämie wurde schon im
+                    # Vorjahr als Stillhaltereinkünfte versteuert → hier aus Topf 2
+                    # raus, damit sie nicht ein zweites Mal erfasst wird.
+                    nv_gain_corr += from_gain
+                    nv_loss_corr += from_loss
                 else:
                     stk_gain_corr += from_gain
                     stk_loss_corr += from_loss
@@ -1693,6 +1729,14 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
             stocks_loss -= stk_loss_corr
             etf_invstg_gain -= etf_gain_corr
             etf_invstg_loss -= etf_loss_corr
+            options_gain -= nv_gain_corr
+            options_loss -= nv_loss_corr
+            # Shadow-Tracking synchron halten (analog current-year, s. dortigen Kommentar).
+            no_invstg_gain -= nv_gain_corr
+            no_invstg_loss -= nv_loss_corr
+            if 'Crypto/Commodity ETPs' in topf2_by_category:
+                topf2_by_category['Crypto/Commodity ETPs']['gain'] -= nv_gain_corr
+                topf2_by_category['Crypto/Commodity ETPs']['loss'] -= nv_loss_corr
             # NOT options_gain += ... (premium was already taxed in the assignment year)
             print(f"Cross-Year Put-Korrektur: {len(cross_year_put_corrections)} Positionen, "
                   f"{cross_year_put_total:,.2f} EUR von PnL abgezogen (Prämie bereits in Vorjahr versteuert).")
@@ -1818,8 +1862,9 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
         # Fondsausschüttungen zu behandeln — sie fließen in reguläre Dividenden.
         is_etf_fund = False
         fund_isin = ''
-        if f.get('subCategory') == 'ETF':
-            fund_isin = f.get('isin', '').strip()
+        _fund_isin_raw = f.get('isin', '').strip()
+        if f.get('subCategory') == 'ETF' or (_fund_isin_raw and is_known_etf(_fund_isin_raw)):
+            fund_isin = _fund_isin_raw
             if fund_isin:
                 cls = _effective_classification(fund_isin)
                 if cls not in ('no_invstg', 'anlage_so'):
@@ -1996,7 +2041,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
 
                 if asset == 'STK':
                     sub_cat = s_row.get('subCategory', '')
-                    if sub_cat == 'ETF':
+                    if sub_cat == 'ETF' or (isin and is_known_etf(isin)):
                         cls = _effective_classification(isin)
                         if cls == 'anlage_so':
                             # Physical Gold-ETC → §23 EStG, not KAP
@@ -2426,7 +2471,7 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
             # Determine topf
             sub = lot.get('subCategory', '')
             isin = lot.get('isin', '').strip()
-            if category == 'STK' and sub == 'ETF' and isin:
+            if category == 'STK' and isin and (sub == 'ETF' or is_known_etf(isin)):
                 cls = _effective_classification(isin)
                 if cls == 'anlage_so':
                     continue  # Gold-ETCs excluded from KAP entirely
