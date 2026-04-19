@@ -1322,48 +1322,69 @@ def calculate_tax(ib_tax_dir, tax_year=None, fx_csv_path=None, anlage_so_overrid
             if not has_close:
                 continue
 
-            # Calculate the prior-year premium for the closed quantity
+            # FIFO: älteste Vorjahres-Sells werden zuerst durch aktuelle Rückkäufe verbraucht.
+            # Issue #52: Vorher gewichteter Durchschnitt über alle Sells — falsch bei
+            # ungleichen Vorjahres-Preisen. Jetzt: nur die tatsächlich verbrauchten Fills
+            # summieren (analog Issue #40 / Zufluss-Block). Steuerrechtlich korrekt laut
+            # BMF-Schreiben 14.05.2025 i.V.m. §11 EStG (Zuflussprinzip).
+            prior_sorted = sorted(prior_sells, key=lambda s: s.get('dateTime', '') or s.get('tradeDate', ''))
+            remaining_close = close_qty
             total_premium_raw = 0.0
             total_commission = 0.0
-            total_qty = 0
-            mult = int(safe_float(prior_sells[0].get('multiplier'), 100))
+            consumed_qty = 0
+            mult = int(safe_float(prior_sorted[0].get('multiplier'), 100))
             fx_weighted = 0.0
+            eur_rate_weighted = 0.0
             sell_date = None
 
-            for s in prior_sells:
+            for s in prior_sorted:
+                if remaining_close <= 0:
+                    break
+                s_qty = abs(int(safe_float(s.get('quantity'))))
+                if s_qty <= 0:
+                    continue
+                take = min(s_qty, remaining_close)
                 price = safe_float(s.get('tradePrice')) or safe_float(s.get('closePrice'))
-                qty = abs(int(safe_float(s.get('quantity'))))
+                if price <= 0:
+                    continue
                 fx = safe_float(s.get('fxRateToBase'), 1.0)
                 comm = safe_float(s.get('ibCommission'), 0)
-                if qty > 0 and price > 0:
-                    total_premium_raw += price * mult * qty
-                    total_commission += comm
-                    fx_weighted += fx * qty
-                    total_qty += qty
+                if take < s_qty:
+                    comm = comm * take / s_qty
+                total_premium_raw += price * mult * take
+                total_commission += comm
+                fx_weighted += fx * take
+                consumed_qty += take
+                if base_currency != 'EUR':
+                    sd = parse_date(s.get('dateTime') or s.get('tradeDate'))
+                    if sd:
+                        eur_rate_weighted += get_rate_for_date(sd, usd_to_eur_rates) * take
                 sd = parse_date(s.get('dateTime') or s.get('tradeDate'))
                 if sd and (sell_date is None or sd < sell_date):
                     sell_date = sd
+                remaining_close -= take
 
-            if total_qty == 0 or total_premium_raw == 0:
+            if consumed_qty == 0 or total_premium_raw == 0:
                 continue
 
-            matched_qty = min(close_qty, total_qty)
-            premium_raw = total_premium_raw * matched_qty / total_qty
-            commission_raw = total_commission * matched_qty / total_qty
+            # Keine Skalierung — die Summe entspricht exakt der verbrauchten Menge
+            matched_qty = consumed_qty
+            premium_raw = total_premium_raw
+            commission_raw = total_commission
             net_premium_raw = premium_raw + commission_raw
-            fx_to_base = fx_weighted / total_qty
+            fx_to_base = fx_weighted / consumed_qty
 
             if base_currency == 'EUR':
                 correction_eur = net_premium_raw * fx_to_base
             else:
-                date = parse_date(prior_sells[0].get('dateTime') or prior_sells[0].get('tradeDate'))
-                rate_eur = get_rate_for_date(date, usd_to_eur_rates)
+                rate_eur = eur_rate_weighted / consumed_qty if consumed_qty else get_rate_for_date(
+                    parse_date(prior_sorted[0].get('dateTime') or prior_sorted[0].get('tradeDate')), usd_to_eur_rates)
                 correction_eur = net_premium_raw * fx_to_base * rate_eur
 
             prior_zufluss_correction_eur += correction_eur
-            symbol = prior_sells[0].get('symbol') or prior_sells[0].get('description') or f"{key[1]} {key[2]} {key[3]}"
-            currency = prior_sells[0].get('currency', '')
-            avg_price = total_premium_raw / (total_qty * mult) if (total_qty and mult) else 0
+            symbol = prior_sorted[0].get('symbol') or prior_sorted[0].get('description') or f"{key[1]} {key[2]} {key[3]}"
+            currency = prior_sorted[0].get('currency', '')
+            avg_price = total_premium_raw / (consumed_qty * mult) if (consumed_qty and mult) else 0
             prior_zufluss_details.append({
                 'symbol': symbol,
                 'strike': key[1],
