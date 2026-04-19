@@ -841,7 +841,7 @@ if has_cross_year:
     if cross_year_details:
         zuflussprinzip_aktiv = st.checkbox(
             "Zuflussprinzip anwenden (BMF Rn. 25, 33)",
-            value=False,
+            value=True,
             help="Verschiebt Assignment-Prämien aus Vorjahren aus dem aktuellen Steuerjahr heraus. "
                  "Diese Prämien gehören in die Steuererklärung des jeweiligen Vorjahres. "
                  "Offene Stillhalter-Positionen und Vorjahres-Korrekturen sind bereits automatisch berechnet.")
@@ -912,7 +912,7 @@ if abs(fx_corr_total) > 0.01:
 """, unsafe_allow_html=True)
     tageskurs_aktiv = st.checkbox(
         "Tageskurs-Methode anwenden (§20 Abs. 4 S. 1 EStG)",
-        value=False,
+        value=True,
         help="Rechnet Veräußerungserlöse und Anschaffungskosten jeweils zum FX-Kurs ihres eigenen Datums um, "
              "statt den gesamten Netto-PnL zum Schlusskurs. Gesetzlich korrekt, aber Abweichung zur IBKR-Methode. "
              "Nur verfügbar mit Extended Flex Query (CLOSED_LOT Daten).")
@@ -935,6 +935,46 @@ if abs(fx_corr_total) > 0.01:
         zeile_22 -= tk_loss_adj.get('Topf2', 0)
     else:
         tageskurs_kapinv_corr = 0
+
+# ── Konsolidierte Toggle-bereinigte Werte (Single Source of Truth) ──────────
+# Wird von GUI-Metrics, KAP-INV-Hero und Text-Report gemeinsam genutzt.
+# ETF-Felder werden bei Bedarf nach der Override-UI aktualisiert.
+_etf_reintegrate = has_etf_data and not invstg_aktiv
+final = {
+    'stocks_gain': (
+        d.get('stocks_gain_eur', 0)
+        + (tk_gain_adj.get('Topf1', 0) if tageskurs_aktiv else 0)
+        + (max(kap_inv.get('etf_gain_raw_eur', 0), 0) if _etf_reintegrate else 0)
+    ),
+    'stocks_loss': (
+        d.get('stocks_loss_eur', 0)
+        + (tk_loss_adj.get('Topf1', 0) if tageskurs_aktiv else 0)
+        + (min(kap_inv.get('etf_loss_raw_eur', 0), 0) if _etf_reintegrate else 0)
+    ),
+    'dividends': (
+        d.get('dividends_eur', 0)
+        + (kap_inv.get('etf_dividends_raw_eur', 0) if _etf_reintegrate else 0)
+    ),
+    'interest': d.get('interest_eur', 0),
+    'options_gain': (
+        d.get('options_gain_eur', 0)
+        - (cross_year_premium if zuflussprinzip_aktiv else 0)
+        + (tk_gain_adj.get('Topf2', 0) if tageskurs_aktiv else 0)
+    ),
+    'options_loss': (
+        d.get('options_loss_eur', 0)
+        + (tk_loss_adj.get('Topf2', 0) if tageskurs_aktiv else 0)
+    ),
+    'topf_1': topf_1,
+    'topf_2': adj_topf_2,
+    'zeile_19': adj_zeile_19,
+    'zeile_20': zeile_20,
+    'zeile_22': zeile_22,
+    'zeile_23': zeile_23,
+    'quellensteuer': quellensteuer,
+    'etf_net_taxable': (kap_inv.get('etf_net_taxable_eur', 0) + tageskurs_kapinv_corr) if (has_etf_data and invstg_aktiv) else 0,
+    'etf_wht':         kap_inv.get('etf_wht_eur', 0)                                     if (has_etf_data and invstg_aktiv) else 0,
+}
 
 # ── Basiswährung ────────────────────────────────────────────────────────────
 
@@ -999,9 +1039,9 @@ section_title(topf_1_label)
 
 st.markdown(
     '<div class="metric-grid">'
-    + metric_card("Aktiengewinne", d['stocks_gain_eur'] + (tk_gain_adj.get('Topf1', 0) if tageskurs_aktiv else 0), "gain")
-    + metric_card("Aktienverluste", d['stocks_loss_eur'] + (tk_loss_adj.get('Topf1', 0) if tageskurs_aktiv else 0), "loss")
-    + metric_card("Saldo Aktien", topf_1, "saldo")
+    + metric_card("Aktiengewinne", final['stocks_gain'], "gain")
+    + metric_card("Aktienverluste", final['stocks_loss'], "loss")
+    + metric_card("Saldo Aktien", final['topf_1'], "saldo")
     + '</div>',
     unsafe_allow_html=True
 )
@@ -1032,12 +1072,12 @@ section_title("Topf 2 · Sonstiges (inkl. Termingeschäfte, Dividenden, Zinsen)"
 
 st.markdown(
     '<div class="metric-grid">'
-    + metric_card("Dividenden", d['dividends_eur'])
-    + metric_card("Zinsen (netto)", d['interest_eur'])
+    + metric_card("Dividenden", final['dividends'])
+    + metric_card("Zinsen (netto)", final['interest'])
     + (metric_card("Sollzinsen (n. abzf.)", d.get('debit_interest_eur', 0), "info") if abs(d.get('debit_interest_eur', 0)) > 0.01 else '')
-    + metric_card("Sonstige Gewinne", d['options_gain_eur'] - adj_cross + (tk_gain_adj.get('Topf2', 0) if tageskurs_aktiv else 0), "gain")
-    + metric_card("Sonstige Verluste", d['options_loss_eur'] + (tk_loss_adj.get('Topf2', 0) if tageskurs_aktiv else 0), "loss")
-    + metric_card("Saldo Sonstiges", adj_topf_2, "saldo")
+    + metric_card("Sonstige Gewinne", final['options_gain'], "gain")
+    + metric_card("Sonstige Verluste", final['options_loss'], "loss")
+    + metric_card("Saldo Sonstiges", final['topf_2'], "saldo")
     + '</div>',
     unsafe_allow_html=True
 )
@@ -1045,7 +1085,8 @@ st.markdown(
 topf2_cats = d.get('topf2_by_category', {})
 if topf2_cats:
     with st.expander("Aufschlüsselung Topf 2"):
-        div_eur = d.get('dividends_eur', 0)
+        # Dividenden toggle-bereinigt: bei deaktiviertem InvStG fließen ETF-Dividenden in Topf 2
+        div_eur = d.get('dividends_eur', 0) + (kap_inv.get('etf_dividends_raw_eur', 0) if (has_etf_data and not invstg_aktiv) else 0)
         int_eur = d.get('interest_eur', 0)
         cat_table = "| Gattung | Gewinne | Verluste | Netto |\n|---------|--------:|---------:|------:|\n"
         if div_eur >= 0:
@@ -1059,6 +1100,8 @@ if topf2_cats:
         for cat, vals in sorted(topf2_cats.items()):
             net = vals['gain'] + vals['loss']
             cat_table += f"| {cat} | {fmt_de(vals['gain'])} EUR | {fmt_de(vals['loss'])} EUR | {fmt_de(net)} EUR |\n"
+        if zuflussprinzip_aktiv and abs(adj_cross) > 0.01:
+            cat_table += f"| Zufluss-Korrektur | 0,00 EUR | {fmt_de(-adj_cross)} EUR | {fmt_de(-adj_cross)} EUR |\n"
         tk_corr_topf2 = (tk_gain_adj.get('Topf2', 0) + tk_loss_adj.get('Topf2', 0)) if tageskurs_aktiv else 0
         if tageskurs_aktiv and abs(tk_corr_topf2) > 0.01:
             if tk_corr_topf2 >= 0:
@@ -1066,7 +1109,7 @@ if topf2_cats:
             else:
                 cat_table += f"| Tageskurs-Korrektur | 0,00 EUR | {fmt_de(tk_corr_topf2)} EUR | {fmt_de(tk_corr_topf2)} EUR |\n"
         total_gain = sum(v['gain'] for v in topf2_cats.values()) + max(div_eur, 0) + max(int_eur, 0) + (tk_gain_adj.get('Topf2', 0) if tageskurs_aktiv else 0)
-        total_loss = sum(v['loss'] for v in topf2_cats.values()) + min(div_eur, 0) + min(int_eur, 0) + (tk_loss_adj.get('Topf2', 0) if tageskurs_aktiv else 0)
+        total_loss = sum(v['loss'] for v in topf2_cats.values()) + min(div_eur, 0) + min(int_eur, 0) + (tk_loss_adj.get('Topf2', 0) if tageskurs_aktiv else 0) + (-adj_cross if zuflussprinzip_aktiv else 0)
         cat_table += f"| **Saldo Topf 2** | **{fmt_de(total_gain)} EUR** | **{fmt_de(total_loss)} EUR** | **{fmt_de(total_gain + total_loss)} EUR** |\n"
         st.markdown(cat_table)
 
@@ -1179,6 +1222,10 @@ if has_etf_data and invstg_aktiv:
                 info['div_taxable'] = new_div_tax
                 cls_map = {0.30: 'aktienfonds', 0.15: 'mischfonds', 0.0: 'sonstiger_fonds'}
                 info['classification'] = cls_map.get(new_tfs, 'sonstiger_fonds')
+
+    # ETF-Overrides in final-Dict spiegeln
+    final['etf_net_taxable'] = etf_net_taxable
+    final['etf_wht'] = etf_wht
 
     # Hero card for KAP-INV net taxable
     inv_hero_color = "#4ade80" if etf_net_taxable >= 0 else "#f87171"
@@ -2227,13 +2274,21 @@ if has_etf_data and invstg_aktiv:
 topf2_detail_export = ""
 if topf2_cats:
     topf2_detail_export = "\nAUFSCHLÜSSELUNG TOPF 2\n"
-    div_eur = d.get('dividends_eur', 0)
-    int_eur = d.get('interest_eur', 0)
+    div_eur = final['dividends']
+    int_eur = final['interest']
     topf2_detail_export += f"  {'Dividenden':24s} G {fmt_de(max(div_eur, 0)):>10} V {fmt_de(min(div_eur, 0)):>10} N {fmt_de(div_eur):>10} EUR\n"
     topf2_detail_export += f"  {'Zinsen':24s} G {fmt_de(max(int_eur, 0)):>10} V {fmt_de(min(int_eur, 0)):>10} N {fmt_de(int_eur):>10} EUR\n"
     for cat, vals in sorted(topf2_cats.items()):
         net = vals['gain'] + vals['loss']
         topf2_detail_export += f"  {cat:24s} G {fmt_de(vals['gain']):>10} V {fmt_de(vals['loss']):>10} N {fmt_de(net):>10} EUR\n"
+    if zuflussprinzip_aktiv and abs(adj_cross) > 0.01:
+        topf2_detail_export += f"  {'Zufluss-Korrektur':24s} G {fmt_de(0):>10} V {fmt_de(-adj_cross):>10} N {fmt_de(-adj_cross):>10} EUR\n"
+    tk_corr_topf2 = (tk_gain_adj.get('Topf2', 0) + tk_loss_adj.get('Topf2', 0)) if tageskurs_aktiv else 0
+    if tageskurs_aktiv and abs(tk_corr_topf2) > 0.01:
+        if tk_corr_topf2 >= 0:
+            topf2_detail_export += f"  {'Tageskurs-Korrektur':24s} G {fmt_de(tk_corr_topf2):>10} V {fmt_de(0):>10} N {fmt_de(tk_corr_topf2):>10} EUR\n"
+        else:
+            topf2_detail_export += f"  {'Tageskurs-Korrektur':24s} G {fmt_de(0):>10} V {fmt_de(tk_corr_topf2):>10} N {fmt_de(tk_corr_topf2):>10} EUR\n"
 
 multi_acct_export = ""
 if n_accounts > 1:
@@ -2246,27 +2301,27 @@ Basiswährung: {d.get('base_currency', 'USD')}
 
 ═══════════════════════════════════════════════════
 TOPF 1: AKTIEN (ohne ETF-Fonds)
-  Aktiengewinne:         {fmt_de(d.get('stocks_gain_eur', 0)):>14} EUR
-  Aktienverluste:        {fmt_de(d.get('stocks_loss_eur', 0)):>14} EUR
+  Aktiengewinne:         {fmt_de(final['stocks_gain']):>14} EUR
+  Aktienverluste:        {fmt_de(final['stocks_loss']):>14} EUR
   ─────────────────────────────────────────────────
-  Saldo Aktien:          {fmt_de(topf_1):>14} EUR
+  Saldo Aktien:          {fmt_de(final['topf_1']):>14} EUR
 
 TOPF 2: SONSTIGES (inkl. Termingeschäfte)
-  Dividenden:            {fmt_de(d.get('dividends_eur', 0)):>14} EUR
-  Zinsen (netto):        {fmt_de(d.get('interest_eur', 0)):>14} EUR
-  Sonstige Gewinne:     {fmt_de(d.get('options_gain_eur', 0)):>14} EUR
-  Sonstige Verluste:    {fmt_de(d.get('options_loss_eur', 0)):>14} EUR
+  Dividenden:            {fmt_de(final['dividends']):>14} EUR
+  Zinsen (netto):        {fmt_de(final['interest']):>14} EUR
+  Sonstige Gewinne:     {fmt_de(final['options_gain']):>14} EUR
+  Sonstige Verluste:    {fmt_de(final['options_loss']):>14} EUR
   ─────────────────────────────────────────────────
-  Saldo Sonstiges:       {fmt_de(topf_2):>14} EUR
+  Saldo Sonstiges:       {fmt_de(final['topf_2']):>14} EUR
 {topf2_detail_export}{fx_export}{sh_export}{inv_export}
 ═══════════════════════════════════════════════════
 ANLAGE KAP EINTRAGUNGEN
-  Zeile 19 (Netto):      {fmt_de(zeile_19):>14} EUR
-  Zeile 20 (Aktiengewinne): {fmt_de(zeile_20):>11} EUR
-  Zeile 22 (Verluste o. Aktien): {fmt_de(zeile_22):>8} EUR
-  Zeile 23 (Aktienverluste): {fmt_de(zeile_23):>11} EUR
-  Zeile 41 (Quellensteuer): {fmt_de(quellensteuer):>11} EUR
-{"" if not (has_etf_data and invstg_aktiv) else chr(10) + "ANLAGE KAP-INV EINTRAGUNGEN" + chr(10) + f"  KAP-INV Erträge (nach TFS): {fmt_de(etf_net_taxable):>8} EUR" + chr(10) + f"  KAP-INV Quellensteuer: {fmt_de(etf_wht):>13} EUR" + chr(10)}{"" if not has_so_data else chr(10) + "ANLAGE SO (§23 EStG) — PRIVATE VERÄUSSERUNGSGESCHÄFTE" + chr(10) + f"  Physische Gold-ETCs (BFH VIII R 4/15)" + chr(10) + f"  Steuerpflichtig (≤ 1J): {fmt_de(so_taxable_for_row):>12} EUR  → Anlage SO" + chr(10) + f"  Steuerfrei (> 1J):      {fmt_de(so_free_for_row):>12} EUR" + chr(10)}═══════════════════════════════════════════════════
+  Zeile 19 (Netto):      {fmt_de(final['zeile_19']):>14} EUR
+  Zeile 20 (Aktiengewinne): {fmt_de(final['zeile_20']):>11} EUR
+  Zeile 22 (Verluste o. Aktien): {fmt_de(final['zeile_22']):>8} EUR
+  Zeile 23 (Aktienverluste): {fmt_de(final['zeile_23']):>11} EUR
+  Zeile 41 (Quellensteuer): {fmt_de(final['quellensteuer']):>11} EUR
+{"" if not (has_etf_data and invstg_aktiv) else chr(10) + "ANLAGE KAP-INV EINTRAGUNGEN" + chr(10) + f"  KAP-INV Erträge (nach TFS): {fmt_de(final['etf_net_taxable']):>8} EUR" + chr(10) + f"  KAP-INV Quellensteuer: {fmt_de(final['etf_wht']):>13} EUR" + chr(10)}{"" if not has_so_data else chr(10) + "ANLAGE SO (§23 EStG) — PRIVATE VERÄUSSERUNGSGESCHÄFTE" + chr(10) + f"  Physische Gold-ETCs (BFH VIII R 4/15)" + chr(10) + f"  Steuerpflichtig (≤ 1J): {fmt_de(so_taxable_for_row):>12} EUR  → Anlage SO" + chr(10) + f"  Steuerfrei (> 1J):      {fmt_de(so_free_for_row):>12} EUR" + chr(10)}═══════════════════════════════════════════════════
 """
 
 st.download_button(
